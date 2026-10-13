@@ -34,6 +34,10 @@ func (e *UninstallFileError) Error() string {
 // CheckUninstallFiles verifies that every existing entry below each target has
 // a recognized Mihari-generated name. It never changes the filesystem.
 func CheckUninstallFiles(ctx context.Context, targets []UninstallTarget) error {
+	return checkUninstallFiles(ctx, targets, "")
+}
+
+func checkUninstallFiles(ctx context.Context, targets []UninstallTarget, command string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -54,7 +58,7 @@ func CheckUninstallFiles(ctx context.Context, targets []UninstallTarget) error {
 		if err := refuseInvalidUninstallRoot(target, info); err != nil {
 			return err
 		}
-		if err := checkUninstallDirectory(ctx, target, target.Path, ""); err != nil {
+		if err := checkUninstallDirectory(ctx, target, target.Path, "", command); err != nil {
 			return err
 		}
 	}
@@ -96,7 +100,7 @@ func refuseInvalidUninstallRoot(target UninstallTarget, info os.FileInfo) error 
 	return nil
 }
 
-func checkUninstallDirectory(ctx context.Context, target UninstallTarget, path, relative string) error {
+func checkUninstallDirectory(ctx context.Context, target UninstallTarget, path, relative, command string) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		return fmt.Errorf("read uninstall %s directory: %w", target.Kind, err)
@@ -117,11 +121,16 @@ func checkUninstallDirectory(ctx context.Context, target UninstallTarget, path, 
 		if reason := uninstallRootLinkReason(info); reason != "" {
 			return newUninstallFileError(target, rel, reason)
 		}
+		// Only the exact separately approved regular command is exempt.
+		// Parent directories and every neighboring entry retain the allowlist.
+		if command != "" && sameUninstallPath(entryPath, command) && info.Mode().IsRegular() {
+			continue
+		}
 		if !allowedUninstallEntry(target.Kind, rel, info.IsDir()) {
 			return newUninstallFileError(target, rel, "")
 		}
 		if info.IsDir() {
-			if err := checkUninstallDirectory(ctx, target, entryPath, rel); err != nil {
+			if err := checkUninstallDirectory(ctx, target, entryPath, rel, command); err != nil {
 				return err
 			}
 		}
@@ -298,7 +307,9 @@ func allowedRuntimeEntry(parts []string, isDir bool) bool {
 func allowedCoreHomeEntry(parts []string, isDir bool) bool {
 	if len(parts) == 1 {
 		if isDir {
-			return parts[0] == "providers" || parts[0] == "ruleset"
+			// The trusted core runtime creates tmp before launching the core.
+			// Its contents still require recognition and are refused below.
+			return parts[0] == "providers" || parts[0] == "ruleset" || parts[0] == "tmp"
 		}
 		return coreHomeFile(parts[0]) || mihomoWorkingFile(parts[0])
 	}

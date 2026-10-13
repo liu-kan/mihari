@@ -42,7 +42,7 @@ type Installer struct {
 	GOOS         string
 	GOARCH       string
 	Runner       CommandRunner
-	CheckTimeout time.Duration // 包住"检查最新版"请求，默认 8s；下载仍用 httpClient 超时（design §4.3）
+	CheckTimeout time.Duration // 包住"检查最新版"请求，默认 8s。资产下载不设 http.Client.Timeout，只跟随请求 context。
 }
 
 type InstallRequest struct {
@@ -233,9 +233,11 @@ func (i Installer) Prepare(ctx context.Context, request InstallRequest) (Prepare
 			}
 		}
 	}()
+	reportPhase(ctx, protocol.ProgressPhaseExtracting)
 	if err := extractAsset(archivePath, asset.Name, candidatePath); err != nil {
 		return nil, err
 	}
+	reportPhase(ctx, protocol.ProgressPhaseChecking)
 	if err := os.Chmod(candidatePath, 0o700); err != nil {
 		return nil, diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "set core executable permissions"}, err)
 	}
@@ -302,7 +304,7 @@ func (i Installer) downloadAsset(ctx context.Context, asset Asset, destination, 
 		return diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "open core download file"}, err)
 	}
 	hash := sha256.New()
-	written, copyErr := io.Copy(io.MultiWriter(file, hash), io.LimitReader(response.Body, maxCoreArchiveSize+1))
+	written, copyErr := io.Copy(io.MultiWriter(file, hash), newProgressReader(ctx, io.LimitReader(response.Body, maxCoreArchiveSize+1), asset.Size))
 	closeErr := file.Close()
 	if copyErr != nil || closeErr != nil {
 		return diagnostics.Wrap(protocol.APIError{Code: protocol.CodeNetworkFailure, Message: "save mihomo core download failed"}, errors.Join(copyErr, closeErr))
@@ -405,10 +407,10 @@ func (i Installer) httpClient() *http.Client {
 	if i.HTTPClient != nil {
 		return i.HTTPClient
 	}
-	return &http.Client{Timeout: 15 * time.Minute}
+	return &http.Client{}
 }
 
-// checkTimeout 返回"检查最新版"请求的超时（默认 8s）；下载仍用 httpClient 的 15min 超时（design §4.3）。
+// checkTimeout 返回"检查最新版"请求的超时（默认 8s）。资产下载不设客户端超时。
 func (i Installer) checkTimeout() time.Duration {
 	if i.CheckTimeout > 0 {
 		return i.CheckTimeout

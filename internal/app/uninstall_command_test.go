@@ -3,15 +3,26 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/mihari-proxy/mihari/internal/control/protocol"
 	"github.com/mihari-proxy/mihari/internal/platform"
 	"github.com/mihari-proxy/mihari/internal/service"
 )
+
+func TestUnmatchedCommand_ControlRootFailureStopsPreflight(t *testing.T) {
+	cause := errors.New("control root unavailable")
+	u := &Uninstaller{controlRootErr: cause}
+	_, _, err := u.UnmatchedCommand(context.Background())
+	if !errors.Is(err, cause) {
+		t.Fatalf("err=%v", err)
+	}
+}
 
 func TestUninstaller_PreviewRejectsRelativeCommandDirectory(t *testing.T) {
 	layout, data, program := uninstallTestLayout(t)
@@ -306,6 +317,110 @@ func TestUninstaller_RunLeavesCommandWhenInstalledProgramMissing(t *testing.T) {
 	}
 }
 
+func TestUninstaller_RunWithCommandConsentDeletesMismatchedRegularFile(t *testing.T) {
+	layout, data, program := uninstallTestLayout(t)
+	writeUninstallFixture(t, data, "mihari.yaml")
+	writeProgramBytes(t, program, []byte("installed"))
+	binDir := t.TempDir()
+	command := filepath.Join(binDir, platform.InstalledBinaryName())
+	if err := os.WriteFile(command, []byte("different"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service := &uninstallFakeService{status: service.StatusStopped, onUninstall: func() {
+		if fileExists(command) {
+			t.Errorf("command file %s still existed when service uninstall started", command)
+		}
+	}}
+	runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(service))
+	t.Setenv("MIHARI_BIN", binDir)
+
+	file, ok, err := runner.UnmatchedCommand(context.Background())
+	if err != nil || !ok || file.Path != command || !strings.Contains(file.Reason, "does not match") {
+		t.Fatalf("unmatched = %+v ok=%t err=%v", file, ok, err)
+	}
+	var progress []string
+	err = runner.RunWithCommandConsent(context.Background(), func(message string) { progress = append(progress, message) }, UninstallCommandConsent{DeleteUnmatched: true})
+	if err != nil || fileExists(command) || fileExists(data) || fileExists(program) || service.uninstallCalls != 1 {
+		t.Fatalf("Run error = %v, command = %t, data = %t, program = %t, calls = %d", err, fileExists(command), fileExists(data), fileExists(program), service.uninstallCalls)
+	}
+	if !progressHas(progress, "Removed "+command) || !progressHas(progress, "Mihari has been completely uninstalled") {
+		t.Fatalf("progress = %#v", progress)
+	}
+}
+
+func TestUninstaller_RunForceWithCommandConsentDeletesWhenInstalledProgramMissing(t *testing.T) {
+	layout, data, program := uninstallTestLayout(t)
+	writeUninstallFixture(t, data, "mihari.yaml")
+	if err := os.MkdirAll(program, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	command := filepath.Join(binDir, platform.InstalledBinaryName())
+	if err := os.WriteFile(command, []byte("orphan"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	service := &uninstallFakeService{status: service.StatusStopped}
+	runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(service))
+	t.Setenv("MIHARI_BIN", binDir)
+
+	file, ok, err := runner.UnmatchedCommand(context.Background())
+	if err != nil || !ok || file.Path != command || !strings.Contains(file.Reason, "installed Mihari program is missing") {
+		t.Fatalf("unmatched = %+v ok=%t err=%v", file, ok, err)
+	}
+	err = runner.RunForceWithCommandConsent(context.Background(), nil, UninstallCommandConsent{DeleteUnmatched: true})
+	if err != nil || fileExists(command) || fileExists(data) || fileExists(program) {
+		t.Fatalf("Run error = %v, command = %t, data = %t, program = %t", err, fileExists(command), fileExists(data), fileExists(program))
+	}
+}
+
+func TestUninstaller_CommandConsentLeavesSymlinkAndDirectory(t *testing.T) {
+	t.Run("directory", func(t *testing.T) {
+		layout, data, program := uninstallTestLayout(t)
+		writeUninstallFixture(t, data, "mihari.yaml")
+		writeProgramBytes(t, program, []byte("installed"))
+		binDir := t.TempDir()
+		command := filepath.Join(binDir, platform.InstalledBinaryName())
+		if err := os.Mkdir(command, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		service := &uninstallFakeService{status: service.StatusStopped}
+		runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(service))
+		t.Setenv("MIHARI_BIN", binDir)
+		if _, ok, err := runner.UnmatchedCommand(context.Background()); err != nil || ok {
+			t.Fatalf("directory unmatched ok=%t err=%v", ok, err)
+		}
+		err := runner.RunWithCommandConsent(context.Background(), nil, UninstallCommandConsent{DeleteUnmatched: true})
+		if err == nil || !fileExists(command) || fileExists(data) {
+			t.Fatalf("directory Run error = %v, command = %t, data = %t", err, fileExists(command), fileExists(data))
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		layout, data, program := uninstallTestLayout(t)
+		writeUninstallFixture(t, data, "mihari.yaml")
+		writeProgramBytes(t, program, []byte("installed"))
+		outside := filepath.Join(t.TempDir(), "outside-mihari")
+		if err := os.WriteFile(outside, []byte("different"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		binDir := t.TempDir()
+		command := filepath.Join(binDir, platform.InstalledBinaryName())
+		if err := os.Symlink(outside, command); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		service := &uninstallFakeService{status: service.StatusStopped}
+		runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(service))
+		t.Setenv("MIHARI_BIN", binDir)
+		if _, ok, err := runner.UnmatchedCommand(context.Background()); err != nil || ok {
+			t.Fatalf("symlink unmatched ok=%t err=%v", ok, err)
+		}
+		err := runner.RunWithCommandConsent(context.Background(), nil, UninstallCommandConsent{DeleteUnmatched: true})
+		outsideBytes, outsideErr := os.ReadFile(outside)
+		if err == nil || !fileExists(command) || fileExists(data) || outsideErr != nil || string(outsideBytes) != "different" {
+			t.Fatalf("symlink Run error = %v, command = %t, data = %t, outside=%q outsideErr=%v", err, fileExists(command), fileExists(data), outsideBytes, outsideErr)
+		}
+	})
+}
+
 func uninstallCommandTestOptions(service *uninstallFakeService) UninstallerOptions {
 	return UninstallerOptions{
 		Service:     service,
@@ -350,4 +465,88 @@ func restoreUninstallCommandRemove(t *testing.T) {
 		commandRemoveFailureIsFatal = prevFatal
 		removeUninstallCommandFile = prevRemove
 	})
+}
+
+func TestUninstaller_ConsentAllowsOnlyCommandInsideDataRoot(t *testing.T) {
+	for _, extra := range []bool{false, true} {
+		t.Run(fmt.Sprint(extra), func(t *testing.T) {
+			layout, data, program := uninstallTestLayout(t)
+			writeUninstallFixture(t, data, "mihari.yaml")
+			writeProgramBytes(t, program, []byte("installed"))
+			bin := filepath.Join(data, "bin")
+			if err := os.MkdirAll(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			command := filepath.Join(bin, platform.InstalledBinaryName())
+			if err := os.WriteFile(command, []byte("unmatched"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if extra {
+				if err := os.WriteFile(filepath.Join(bin, "unrelated.txt"), []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			svc := &uninstallFakeService{status: service.StatusStopped}
+			runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(svc))
+			t.Setenv("MIHARI_BIN", bin)
+			err := runner.RunWithCommandConsent(context.Background(), nil, UninstallCommandConsent{DeleteUnmatched: true})
+			if extra {
+				if err == nil || !fileExists(command) || svc.uninstallCalls != 0 {
+					t.Fatalf("err=%v command=%t calls=%d", err, fileExists(command), svc.uninstallCalls)
+				}
+				return
+			}
+			if err != nil || fileExists(command) || fileExists(data) || svc.uninstallCalls != 1 {
+				t.Fatalf("err=%v command=%t data=%t calls=%d", err, fileExists(command), fileExists(data), svc.uninstallCalls)
+			}
+		})
+	}
+}
+
+func TestUninstaller_DeferredCommandFailureStillChecksOtherRoots(t *testing.T) {
+	layout, data, program := uninstallTestLayout(t)
+	writeUninstallFixture(t, data, "mihari.yaml")
+	writeProgramBytes(t, program, []byte("installed"))
+	bin := filepath.Join(data, "bin")
+	if err := os.MkdirAll(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	command := filepath.Join(bin, platform.InstalledBinaryName())
+	if err := os.WriteFile(command, []byte("unmatched"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	originalRemove, originalFatal := removeUninstallCommandFile, commandRemoveFailureIsFatal
+	removeUninstallCommandFile = func(string) error { return errors.New("fixture image locked") }
+	commandRemoveFailureIsFatal = false
+	t.Cleanup(func() { removeUninstallCommandFile, commandRemoveFailureIsFatal = originalRemove, originalFatal })
+	svc := &uninstallFakeService{status: service.StatusStopped}
+	runner := newUninstallTestRunner(t, layout, uninstallCommandTestOptions(svc))
+	t.Setenv("MIHARI_BIN", bin)
+	err := runner.RunWithCommandConsent(context.Background(), nil, UninstallCommandConsent{DeleteUnmatched: true})
+	var api protocol.APIError
+	if !errors.As(err, &api) || api.Code != protocol.CodeInvalidState || fileExists(data) || fileExists(program) {
+		t.Fatalf("err=%v data=%t program=%t", err, fileExists(data), fileExists(program))
+	}
+}
+
+func TestUninstallCommand_ConsentedFileRecheckedBeforeRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), platform.InstalledBinaryName())
+	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	plan := applyUnmatchedCommandConsent(uninstallCommandPlan{path: path, confirm: true}, UninstallCommandConsent{DeleteUnmatched: true})
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	deferred, stop := removeClassifiedUninstallCommand(plan, nil)
+	if deferred == nil && stop == nil {
+		t.Fatal("changed command directory treated as removable file")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("command directory removed: %v", err)
+	}
 }

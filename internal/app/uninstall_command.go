@@ -21,9 +21,11 @@ var errInstalledProgramMissing = errors.New("installed Mihari program is missing
 var errCommandNotComparable = errors.New("command file is not comparable")
 
 type uninstallCommandPlan struct {
-	path   string
-	remove bool
-	leave  error
+	path        string
+	remove      bool
+	confirm     bool
+	regularOnly bool
+	leave       error
 }
 
 func uninstallCommandPath() (string, error) {
@@ -56,6 +58,7 @@ func classifyUninstallCommand(installRoot string) (uninstallCommandPlan, error) 
 		plan.leave = fmt.Errorf("leaving %s: command path is not a file", path)
 		return plan, nil
 	}
+	regularCommand := info.Mode().IsRegular()
 	followed, err := os.Stat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -72,6 +75,7 @@ func classifyUninstallCommand(installRoot string) (uninstallCommandPlan, error) 
 	if err != nil {
 		if errors.Is(err, errInstalledProgramMissing) {
 			plan.leave = fmt.Errorf("leaving %s: installed Mihari program is missing, so the command file was left in place", path)
+			plan.confirm = regularCommand
 			return plan, nil
 		}
 		if errors.Is(err, errCommandNotComparable) {
@@ -82,10 +86,26 @@ func classifyUninstallCommand(installRoot string) (uninstallCommandPlan, error) 
 	}
 	if !match {
 		plan.leave = fmt.Errorf("leaving %s: command file does not match the installed Mihari program", path)
+		plan.confirm = regularCommand
 		return plan, nil
 	}
 	plan.remove = true
 	return plan, nil
+}
+
+func applyUnmatchedCommandConsent(plan uninstallCommandPlan, consent UninstallCommandConsent) uninstallCommandPlan {
+	if !plan.confirm || !consent.DeleteUnmatched {
+		return plan
+	}
+	info, err := os.Lstat(plan.path)
+	if err != nil || !info.Mode().IsRegular() {
+		return plan
+	}
+	plan.remove = true
+	plan.regularOnly = true
+	plan.confirm = false
+	plan.leave = nil
+	return plan
 }
 
 func commandFileMatchesInstalled(installed, command string) (bool, error) {
@@ -137,6 +157,19 @@ func hashCommandFile(path string) ([]byte, error) {
 // go away.
 func removeClassifiedUninstallCommand(plan uninstallCommandPlan, progress func(string)) (deferred error, stop error) {
 	if plan.remove {
+		if plan.regularOnly {
+			info, err := os.Lstat(plan.path)
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, nil
+			}
+			if err != nil {
+				return nil, fmt.Errorf("recheck approved command file %s: %w", plan.path, err)
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("approved command file is no longer a regular file: %s", plan.path)
+			}
+		}
+
 		if err := removeUninstallCommandFile(plan.path); err != nil {
 			removeErr := fmt.Errorf("remove %s: %w", plan.path, err)
 			if !commandRemoveFailureIsFatal {

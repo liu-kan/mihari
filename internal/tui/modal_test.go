@@ -8,6 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/mihari-proxy/mihari/internal/tui/ui"
 )
 
 func TestErrorModal_ScrollsCopiesAndKeepsFocusOnCopyFailure(t *testing.T) {
@@ -35,6 +37,25 @@ func TestErrorModal_ScrollsCopiesAndKeepsFocusOnCopyFailure(t *testing.T) {
 	m = updated.(Model)
 	if m.modal != nil {
 		t.Fatal("details did not close")
+	}
+}
+
+func TestErrorModal_SentCopyShowsManualHint(t *testing.T) {
+	modal := NewErrorDetail("Details", "body")
+	modal.copyStatus = ui.CopySentNotice
+	view := modal.View(80, 24)
+	theme := ui.DefaultTheme()
+	if !strings.Contains(view, theme.BrightYellow.Render(ui.CopySentNotice)) || !strings.Contains(ansi.Strip(view), "manually if your terminal") {
+		t.Fatalf("sent copy stayed easy to miss:\n%s", view)
+	}
+}
+
+func TestErrorModal_TerminalCopyKeepsFooterWithLongBody(t *testing.T) {
+	m := NewErrorDetail("Details", strings.Repeat("diagnostic line\n", 100))
+	m.copyStatus = ui.CopySentNotice
+	view := ansi.Strip(m.View(80, 24))
+	if !strings.Contains(view, "Esc close") {
+		t.Fatalf("footer clipped: %s", view)
 	}
 }
 
@@ -115,5 +136,28 @@ func TestHelpModal_IgnoresEnterAndTab(t *testing.T) {
 	}
 	if modal.Update(tea.KeyPressMsg{Code: tea.KeyTab}) != ModalNone {
 		t.Fatal("tab closed help")
+	}
+}
+
+func TestErrorModal_CopyRunsInCommandAndCapturesBody(t *testing.T) {
+	modal := NewErrorDetail("fixture", "original")
+	calls := 0
+	modal.copyResult = func(body string) ui.CopyResult {
+		calls++
+		if body != "original" {
+			t.Fatalf("body=%q", body)
+		}
+		return ui.CopyResult{Kind: ui.CopySentToTerminal, Command: func() tea.Msg { return "sent" }}
+	}
+	cmd := modal.copyCommand()
+	if calls != 0 {
+		t.Fatal("clipboard called before command execution")
+	}
+	modal.body = "changed"
+	result := cmd().(errorCopyResultMsg)
+	model := Model{modal: nil}
+	_, dispatch := model.Update(result)
+	if calls != 1 || dispatch == nil || dispatch() != "sent" {
+		t.Fatal("captured terminal command not dispatched after modal close")
 	}
 }

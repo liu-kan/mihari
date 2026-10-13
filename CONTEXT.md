@@ -4,6 +4,27 @@ Mihari 管理本机 mihomo，并向本地用户提供一致的配置管理与运
 
 ## Language
 
+**YAML 导入（Import from YAML）**：从记录的本地文件来源取得 YAML 内容，形成可读取的主 YAML 副本；所引用的外部文件仍须可用。源文件变化仅在下一次成功刷新后更新该副本。
+_Avoid_: 直接运行文件、持续绑定源文件、将导入等同于文件同步
+
+**导入源文件（Import Source File）**：用户提供给某次 YAML 导入的原始文件。它由用户维护，不属于 Mihari 管理的运行配置。
+_Avoid_: 运行配置、将源文件等同于导入缓存
+
+**本地文件来源（Local File Source）**：导入条目所记录的 YAML 文件路径，是后续手动或定时刷新重新取得内容的位置。
+_Avoid_: 将记录来源路径等同于让 mihomo 直接运行源文件、一次性上传
+
+**本地来源刷新（Local Source Refresh）**：重新从已记录文件来源取得 YAML 内容，校验成功后更新导入缓存的操作。失败时保留最后有效缓存。
+_Avoid_: 文件监听、源文件发生变化即自动生效
+
+**本地文件引用（Local File Reference）**：配置内容对另一个本地输入文件的依赖，与主 YAML 自身的文件来源不同。
+_Avoid_: 主 YAML 文件来源、HTTP provider 的下载缓存路径
+
+**导入缓存（Imported Configuration Cache）**：Mihari 保存的一份已导入 YAML 原始内容副本；源文件不可用不影响读取该主 YAML 副本；运行所需的引用文件仍须可用。它与受 Mihari 参数覆盖影响的运行配置不同。
+_Avoid_: 源文件、运行配置、临时文件
+
+**运行配置（Runtime Configuration）**：结合已取得的配置内容与 Mihari 当前管理设置、实际提供给受管 mihomo 的配置。
+_Avoid_: 原始 YAML、导入缓存、将参数覆盖理解为修改源文件
+
 **整合包**：一次发布里带有 Mihari 程序、核心和地理数据的归档。
 _Avoid_: 离线包
 
@@ -153,3 +174,34 @@ _Avoid_: daemon 启动时刻、本次 daemon 生命周期内第一次成功启�
 
 **核心重启次数（Core Restart Count）**：当前这次 daemon 生命周期内，core 进程被再次拉起的次数。第一次成功启动计为 0。自愿与非自愿的再次拉起都计入。
 _Avoid_: 崩溃次数、启动次数、daemon 重启次数。
+
+**未提权（not elevated）**：这个 TUI 进程不是 Windows 管理员，也不是 Unix root。
+_Avoid_: 服务已停止、守护进程没有权限
+
+**需要管理员（Needs admin）**：当前 TUI 进程缺少完成屏幕上这一步所需的管理员或 root 权限。这一步可以是系统服务操作，也可以是在 Linux 上说清某个托管端口的占用者。
+_Avoid_: not elevated、不能修改托管端口
+
+**端口归属（Port Hold）**：一个托管监听地址（Mixed、Controller 或 Web）和它的监听者之间的关系。
+_Avoid_: 服务状态
+
+**本实例占用（Owned）**：监听者是本 Mihari 实例。
+_Avoid_: 仅凭进程名叫 mihomo 或 mihari 就视为本实例
+
+**其他进程占用（Occupied）**：监听者是别的进程。
+
+**端口空闲（Available）**：这个托管地址可以绑定。
+
+**归属确认中（Checking）**：已经有监听者，本实例还不能确认那是不是自己。界面写 `Checking owner…`。
+_Avoid_: Unknown
+
+**未知端口归属（Unknown）**：托管端口没有确认到的占用者，而且原因不是缺少权限。地址还没配置，或者进程已经提权却仍无法分类，都是这种情况。
+_Avoid_: Needs admin、把版本未知或服务状态未知当成端口归属
+
+**核心制品下载（Core Asset Download）**：把本次更新目标的官方制品字节取到本机。它不包含解压、版本检查和试运行。
+_Avoid_: 核心安装请求、把解压后的二进制大小当成这次下载的文件大小
+
+**核心安装请求（Core Install Request）**：本地客户端向 daemon 发起、并一直等到这次核心安装结束的那一次调用。它包含核心制品下载，以及其后的准备和试运行。
+_Avoid_: 核心制品下载、把这次调用的等待时间当成下载用时
+
+**核心下载进度（Core Download Progress）**：一次核心制品下载已经收到的字节、制品总大小（发布方提供时）以及这次下载已经用去的时间。
+_Avoid_: 解压或试运行的进度、安装请求从开始到结束的总等待时间

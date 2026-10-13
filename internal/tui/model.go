@@ -81,6 +81,7 @@ type Model struct {
 	installation           *installationUI
 	preparedInstallation   *app.InstallationExecuteRequest
 	preparedUninstall      bool
+	deleteUnmatchedCommand bool
 	now                    time.Time // spinner clock; advanced only while work is pending
 	spinning               bool      // true while a spinner tick loop is scheduled
 	spinGen                uint64    // generation so only the latest tick loop may reschedule
@@ -416,10 +417,16 @@ func (model Model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.modal = NewErrorDetail(typed.Title, typed.Body)
 		return model, nil
 	case errorCopyResultMsg:
+		if typed.kind == ui.CopySentToTerminal {
+			if model.modal == typed.modal {
+				model.modal.copyStatus = ui.CopySentNotice
+			}
+			return model, typed.command
+		}
 		if model.modal == typed.modal {
 			model.modal.copyStatus = "Copied"
 			if typed.err != nil {
-				model.modal.copyStatus = "Copy failed"
+				model.modal.copyStatus = ui.CopyFailureText("Copy failed", typed.err)
 			}
 		}
 		return model, nil
@@ -567,6 +574,10 @@ func (model Model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model, nil
 	case ui.ActionIntentMsg:
 		return model.handleActionIntent(typed)
+	case ui.CompleteUninstallConfirmedMsg:
+		model.preparedUninstall = true
+		model.deleteUnmatchedCommand = typed.DeleteUnmatchedCommand
+		return model, tea.Quit
 	case actionExecuteMsg:
 		return model.executeAction(typed.Intent)
 	case actionCompletedMsg:
@@ -583,8 +594,9 @@ func (model Model) update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if typed.Intent.Action == ui.ActionCompleteUninstall {
-			if _, ok := typed.Result.(ui.CompleteUninstallConfirmedMsg); ok {
+			if confirmed, ok := typed.Result.(ui.CompleteUninstallConfirmedMsg); ok {
 				model.preparedUninstall = true
+				model.deleteUnmatchedCommand = confirmed.DeleteUnmatchedCommand
 				return model, tea.Quit
 			}
 			if next, ok := typed.Result.(ui.ActionIntentMsg); ok && next.Action == ui.ActionCompleteUninstall {

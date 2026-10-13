@@ -20,11 +20,12 @@ mihari service restart
 mihari service reinstall
 mihari service uninstall
 mihari service uninstall --purge --yes
+mihari service uninstall --purge --yes --delete-unmatched-command
 ```
 
 执行 `service install` + `start` 后,关闭 TUI 或普通控制台**不会**停止 Mihari;只有 `service stop`、卸载或操作系统才能停止它。同样的控制也在 TUI 的 **System** 页面中提供(变更操作需要提权 shell)。
 
-Unix 的 install/reinstall/update/start/stop/uninstall 走统一安装用例，未完成事务须显式恢复；Windows 保持原服务行为。Unix 自动化入口为 `mihari service apply --request /absolute/request.json`（严格版本化 JSON，请求文件 root0600）；operation=recover 用于恢复，不会隐式导入旧树。普通 `service uninstall` 只注销 OS 服务，保留数据与旧日志，也不删除 PATH 命令文件。`--purge --yes` 先卸载服务，再删除白名单内的受管文件；未知文件名会停止且不删除。`--purge --yes --force` 跳过内容检查并删除整个目标文件夹。TUI System 页 **Completely Uninstall Mihari** 列出将清空的文件夹并确认两次，等价于 `--force`。完整卸载还会删除一个与安装根程序字节相同的 PATH 命令文件：目录来自当前进程的 `MIHARI_BIN`，未设置时 Unix 为 `/usr/local/bin`，Windows 为 `%LOCALAPPDATA%\Programs\mihari`。确认列表除将清空的文件夹外，只列出将尝试删除的那一个命令文件。非绝对 `MIHARI_BIN` 在确认前失败。字节不一致时保留该文件，其余目标仍删除，且不宣称完全卸载，也不给出删除命令。Unix 上删除失败则立即停止；Windows 上正在运行的命令文件可以残留，同样不以完全卸载成功结束，错误中给出退出后执行的 `Remove-Item -LiteralPath '<路径>' -Force`。需要已提权 shell，不自动弹出 UAC/sudo。
+Unix 的 install/reinstall/update/start/stop/uninstall 走统一安装用例，未完成事务须显式恢复；Windows 保持原服务行为。Unix 自动化入口为 `mihari service apply --request /absolute/request.json`（严格版本化 JSON，请求文件 root0600）；operation=recover 用于恢复，不会隐式导入旧树。普通 `service uninstall` 只注销 OS 服务，保留数据与旧日志，也不删除 PATH 命令文件。`--purge --yes` 先卸载服务，再删除白名单内的受管文件；未知文件名会停止且不删除。`--purge --yes --force` 跳过内容检查并删除整个目标文件夹。TUI System 页 **Completely Uninstall Mihari** 列出将清空的文件夹并确认两次，等价于 `--force`。完整卸载还会删除一个与安装根程序字节相同的 PATH 命令文件：目录来自当前进程的 `MIHARI_BIN`，未设置时 Unix 为 `/usr/local/bin`，Windows 为 `%LOCALAPPDATA%\Programs\mihari`。确认列表除将清空的文件夹外，只列出将尝试删除的那一个命令文件。非绝对 `MIHARI_BIN` 在确认前失败。命令路径是普通文件，但字节不一致或安装根程序已缺失时，交互终端且不是 `--json` 时会再问 `Delete unmatched command file <路径>? [y/N]`，默认不删；非交互或 `--json` 需 `--delete-unmatched-command`。`--purge --yes` 本身不算同意。同意后在停服务前删除该普通文件。拒绝或未给开关时保留该文件，其余目标仍删除，且不宣称完全卸载，也不给出删除命令。目录和符号链接不通过这次确认删除。Unix 上删除失败则立即停止；Windows 上正在运行的命令文件可以残留，同样不以完全卸载成功结束，错误中给出退出后执行的 `Remove-Item -LiteralPath '<路径>' -Force`。需要已提权 shell，不自动弹出 UAC/sudo。
 
 Linux 服务启动失败后，systemd 可能显示 `activating (auto-restart)`。如果此时主进程已退出（`MainPID=0`），`mihari service status` 返回 `stopped`，仍允许进入服务停止或重装流程；这不表示 systemd 已取消自动重启。升级旧版本后若日志提示 `existing data requires recovery or migration`，应使用包含此修复的版本执行 `sudo mihari service reinstall`，由安装事务处理旧数据和服务定义，而不是直接修改 unit 的启动参数。重装失败时保留报错和 `journalctl -u mihari` 日志继续排查。
 
@@ -120,6 +121,8 @@ mihari logs --follow
 
 `core install` / `core update` 从所选 stable/alpha 通道获取官方最新版，先检查候选，再替换和验收；常规失败保留或恢复旧核心与原通道。更新 Mihari 本身保留已有核心，离线首次安装可使用包内版本。本地已有核心不要求官方来源凭据，但仍遵守平台已有权限和文件身份保护。
 
+核心安装进度输出到 stderr：终端中原地刷新，重定向到文件或管道时使用普通文本行；`--json` 不输出文本进度，保留单一结果 envelope。
+
 `core reinstall` 重新下载原通道官方最新版，即使当前版本相同也会重装；TUI System 的 **Reinstall core** 提供同一操作。更新中断后，它沿用更新前通道，保留订阅和配置，失败继续保留备份与阻断，验收成功才解除阻断。普通 `core restart` 不修复中断更新。诊断会列出数据根 `staging/core` 中的材料位置；不要删除中断记录来绕过阻断。损坏的记录、无效配置或权限错误仍须按诊断处理，重装不能保证修复所有故障。
 
 `proxy mode` 查询保存模式、实际模式和应用状态，带参数则切换；支持 `--json`。模式只有 `rule` / `global` / `direct`，默认 Rule，覆盖订阅自带 mode。模式由 Mihari 全局持久化，GLOBAL 出口按订阅记忆；Rule/Direct 下也能预选 GLOBAL，选择本身不会切换模式。Global 选择 `DIRECT` 表示所有新连接通过 GLOBAL 直连；Direct 是独立运行模式，不依赖 GLOBAL 的选择。
@@ -135,6 +138,9 @@ settings 新增可选 `routing.mode`、`routing.global-selections`（订阅 ID �
 ```console
 mihari sub add NAME URL
 mihari sub add NAME URL --proxy auto
+mihari sub add NAME --file /absolute/path/main.yaml
+mihari sub add NAME --file "C:\configs\main.yaml" --allow-file-references
+mihari sub set ID --file /absolute/path/new.yaml
 mihari sub list
 mihari sub show ID
 mihari sub refresh ID
@@ -148,7 +154,7 @@ mihari sub remove ID --yes
 
 订阅 URL 由守护进程持久化,并从普通 list/show 业务响应中省略；错误本身携带的 URL 会保留在诊断详情中。每个有效配置都有独立缓存,因此 `sub use` 在无 provider 网络访问时也能工作。`--proxy` 为主订阅 YAML 的拉取渠道:`direct`(默认)、`proxy` 或 `auto`。`auto` 在代理连接超时、拒绝、重置或成功响应正文读取超时后尝试直连；HTTP 错误、无效文档和整次操作取消不触发回退。生成的配置总是在 `mihomo -t` 与重载之前恢复 Mihari 托管的内环回控制器、密钥与端口不变量。
 
-`sub add` / `sub refresh` 的控制请求允许等待 180 秒，daemon 正常执行共用 120 秒上限，单次代理/直连下载各保留 30 秒；剩余等待余量用于已开始事务的有界补偿与响应。Ctrl+C 或更短的调用方 deadline 仍可提前取消。普通控制请求不使用该长预算。添加已注册但首次下载失败时保留订阅，应刷新同一 ID；客户端响应丢失不代表服务器未保存，不要盲目重复添加。CLI 的 `auto` 参数和输出不变，TUI 展示为 `PROXY w Fallback to DIRECT`，批量刷新每条使用独立预算。Provider override 不在该设置范围，CLI/TUI 与 daemon 应同步升级。
+`sub add` / `sub refresh` 的控制请求允许等待 180 秒，daemon 正常执行共用 120 秒上限，单次代理/直连下载各保留 30 秒；剩余等待余量用于已开始事务的有界补偿与响应。Ctrl+C 或更短的调用方 deadline 仍可提前取消。普通控制请求不使用该长预算。新建订阅先获取并校验，失败不保留条目；客户端响应丢失不代表服务器未保存，不要盲目重复添加。CLI 的 `auto` 参数和输出不变，TUI 展示为 `PROXY w Fallback to DIRECT`，批量刷新每条使用独立预算。Provider override 不在该设置范围，CLI/TUI 与 daemon 应同步升级。
 
 `sub set` 修改 URL 保留旧缓存与 InUse，不立即拉取或重载；修改单条 interval 重置调度并标记 Expired，成功刷新后清除。CLI 参数仍为 `--proxy`，JSON 字段仍为 `proxy_mode`；仅新增公开缓存状态字段，没有新增 reveal CLI 命令。普通 list/show 业务响应继续省略完整 URL；专门的认证本地 API 是支持的读取入口。文件日志、导出及 CLI/TUI 错误详情保留错误自带的 URL，不额外读取或转储订阅。TUI 操作、结果未知处理和配套升级/降级备份要求见 [README](../README.zh-CN.md)。
 
@@ -217,3 +223,7 @@ CLI 文本错误统一展示概要、既有错误码与原始详情。非流式 
 TUI 九个页面均可按 F2 打开诊断历史，在列表和详情间切换、滚动并复制已采集原文，关闭后恢复原有输入和确认弹窗。后台发生记录也会进入有界历史，不自动抢焦点。日志级别和文件 logger 的可用性不会抑制错误详情；主动取消和正常 EOF 不新增错误，取消伴随的实际清理失败仍保留。
 
 所有日志与本地错误汇报不脱敏。原文中的凭据、完整 URL、路径和配置片段均保留；终端展示只转义控制字符，JSON 和复制保留已采集文本。单条采集上限 256 KiB，截断会明确标记。daemon 历史最多 256 条/32 MiB，本地 TUI 历史最多 128 条/16 MiB；淘汰、重启、旧 daemon 不支持或详情获取失败均有明确状态，历史不持久化。每次实际发生分别记录，同一记录 ID 的重复传输不新增发生记录。
+
+本地 YAML 导入复用缓存、生成和刷新事务。`--file` 只接受绝对路径或 file URI，不与 URL/`--proxy` 合用；已有条目禁止 URL/file 跨类型转换。同类型来源编辑保留旧缓存及其目录，不立即 reload。daemon 使用自身权限读取普通文件，最大 16 MiB。Windows、Linux、macOS 路径由 platform 转换，普通业务响应不暴露完整路径。
+
+创建本地/远程订阅遇到本地文件引用时，校验后列出引用与后果。非交互/`--json` 须加 `--allow-file-references`，否则 `invalid_argument`、退出码 2，`details.confirmation_required=file_references`；交互 CLI/TUI 默认取消，同意后以新操作 ID 重新读取校验。后续更新不再询问。Mihari 只缓存主 YAML，原生 mihomo watcher/文件操作独立于自动刷新，引用文件不能随主缓存回滚。URL provider 原生下载保持。参见 [ADR 0009](adr/0009-local-yaml-source-and-cache.md)。

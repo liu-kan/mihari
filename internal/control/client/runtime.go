@@ -29,7 +29,9 @@ const (
 const SubscriptionMutationTimeout = 180 * time.Second
 
 type runtimeRequestOptions struct {
-	timeout time.Duration
+	timeout      time.Duration
+	noTimeout    bool
+	quietCleanup bool
 }
 
 type runtimeOutcome struct {
@@ -47,14 +49,14 @@ func (c *Client) Core(ctx context.Context) (protocol.CoreStatus, error) {
 
 func (c *Client) InstallCore(ctx context.Context, request protocol.MutationRequest) (protocol.CoreInstallResult, error) {
 	var result protocol.CoreInstallResult
-	err := c.doMutation(ctx, logging.OperationMetadata{ID: request.OperationID, Name: "core.install"}, http.MethodPost, "/v1/core/install", request, &result)
+	err := c.doMutation(ctx, logging.OperationMetadata{ID: request.OperationID, Name: "core.install"}, http.MethodPost, "/v1/core/install", request, &result, runtimeRequestOptions{noTimeout: true})
 	return result, err
 }
 
 // ReinstallCore requests a new official core in the last accepted channel.
 func (c *Client) ReinstallCore(ctx context.Context, request protocol.MutationRequest) (protocol.CoreInstallResult, error) {
 	var result protocol.CoreInstallResult
-	err := c.doMutation(ctx, logging.OperationMetadata{ID: request.OperationID, Name: "core.reinstall"}, http.MethodPost, "/v1/core/reinstall", request, &result)
+	err := c.doMutation(ctx, logging.OperationMetadata{ID: request.OperationID, Name: "core.reinstall"}, http.MethodPost, "/v1/core/reinstall", request, &result, runtimeRequestOptions{noTimeout: true})
 	return result, err
 }
 
@@ -306,7 +308,7 @@ func (c *Client) RemoveSubscription(ctx context.Context, id string, request prot
 }
 
 func (c *Client) doMutation(ctx context.Context, operation logging.OperationMetadata, method, path string, input, output any, options ...runtimeRequestOptions) error {
-	if len(options) > 0 && options[0].timeout > 0 {
+	if len(options) > 0 && options[0].timeout > 0 && !options[0].noTimeout {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, options[0].timeout)
 		defer cancel()
@@ -577,9 +579,13 @@ func (c *Client) doRuntimeOutcome(ctx context.Context, method, path string, inpu
 	// Every return after Do may describe a request that reached the daemon.
 	defer func() { outcome.dispatched = true }()
 	httpClient := c.requestHTTP()
-	if len(options) > 0 && options[0].timeout > 0 {
+	if len(options) > 0 && (options[0].noTimeout || options[0].timeout > 0) {
 		copy := *httpClient
-		copy.Timeout = options[0].timeout
+		if options[0].noTimeout {
+			copy.Timeout = 0
+		} else {
+			copy.Timeout = options[0].timeout
+		}
 		httpClient = &copy
 	}
 	response, err := httpClient.Do(request)
@@ -587,9 +593,9 @@ func (c *Client) doRuntimeOutcome(ctx context.Context, method, path string, inpu
 		return c.localRuntimeOutcome(err)
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return c.responseOutcome(ctx, response)
+		return c.responseOutcome(ctx, response, options...)
 	}
-	defer c.closeRuntimeResponse(ctx, response, &outcome)
+	defer c.closeRuntimeResponse(ctx, response, &outcome, options...)
 	raw, err := io.ReadAll(io.LimitReader(response.Body, responseLimit+1))
 	if err != nil {
 		return c.localRuntimeOutcome(err)
@@ -625,7 +631,7 @@ func decodeRuntimeHTTPErrorOutcome(response *http.Response) (error, bool) {
 
 // closeRuntimeResponse keeps local cleanup causes with the local failure owner.
 // A valid response remains valid when cleanup alone fails.
-func (c *Client) closeRuntimeResponse(ctx context.Context, response *http.Response, outcome *runtimeOutcome) {
+func (c *Client) closeRuntimeResponse(ctx context.Context, response *http.Response, outcome *runtimeOutcome, options ...runtimeRequestOptions) {
 	if err := response.Body.Close(); err != nil {
 		if outcome.err != nil && !outcome.remoteEnvelope {
 			var api protocol.APIError
@@ -634,6 +640,9 @@ func (c *Client) closeRuntimeResponse(ctx context.Context, response *http.Respon
 			} else {
 				outcome.err = errors.Join(outcome.err, err)
 			}
+			return
+		}
+		if len(options) > 0 && options[0].quietCleanup {
 			return
 		}
 		if reporter := c.diagnosticReporter(); reporter != nil {

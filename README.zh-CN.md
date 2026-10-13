@@ -107,7 +107,7 @@ mihari
 
 交互式设置沿用现有 TUI 主题和分步布局，长任务显示当前动作、动态等待指示与耗时。失败时显示安全的具体原因和下一步建议，按 F2 可打开可滚动、可复制的诊断详情。
 
-端口修改经确认后立即由 daemon 保存，已保存资源不会因中断丢失。重新进入时检查必需的端口与核心，继续未完成的设置；可选订阅、GeoIP 缺失不会强制进入向导。Core 分别展示本地可用性、版本、通道和运行状态，GeoIP 分别展示 Country/ASN 可用性及更新时间。已有订阅时保留概览步骤，展示数量、各项状态及当前使用项，按 Enter 继续且不修改已有订阅；继续添加或管理请进入 Subscriptions 页面。新订阅已注册但首次下载失败时，重试会刷新同一订阅，不重复添加。
+端口修改经确认后立即由 daemon 保存，已保存资源不会因中断丢失。重新进入时检查必需的端口与核心，继续未完成的设置；可选订阅、GeoIP 缺失不会强制进入向导。Core 分别展示本地可用性、版本、通道和运行状态，GeoIP 分别展示 Country/ASN 可用性及更新时间。已有订阅时保留概览步骤，展示数量、各项状态及当前使用项，按 Enter 继续且不修改已有订阅；继续添加或管理请进入 Subscriptions 页面。新订阅先获取并校验，首次导入失败不留下条目。
 
 操作中按 Esc 会先确认取消，再核对 daemon 执行是否收尾及实际保存结果。“结果待确认”不代表没有保存，此时可重新检查或退出，不盲目重复提交。Ctrl+Q 确认退出。已确认的启动端口冲突会通过认证本地 IPC 开放受限端口恢复，其他业务变更仍不可用。改端口后需重启 daemon，再重新检查或等待重连；当前服务接口不能验证服务是否属于所连接的实例，因此向导不会自动重启可能不相干的服务。
 
@@ -127,14 +127,24 @@ mihari sysproxy enable
 - **订阅配置**:每个订阅独立缓存、离线切换、按配置独立的刷新间隔、按订阅的拉取代理(`direct` / `proxy` / `auto`;`auto` 在可回退的代理网络错误后尝试直连),以及经过校验的原子化配置生成与回滚。
 - **Web 面板**:一键安装 / 更新 / 激活 / 回滚 zashboard 与 MetaCubeXD,置于带独立访问凭据的回环 Web 网关之后。
 - **系统代理与 TUN**:跨平台的系统代理控制与托管 TUN,均由守护进程持有并持久化。若其他产品已持有系统代理(`system_proxy_conflict`),或检测到其他 TUN / mihomo 实例(`tun_conflict`),enable 会失败,除非传入 `--force`(TUI 会要求确认)。
-- **端口配置**:System 页面可修改 Mixed / Controller / Web 端口;占用显示 `Owned` 或 `Occupied by name (pid)`。启动期间尚未收到核心身份时，已检测到监听进程的端口显示中性的 `Checking owner…`。重启后，归属判断随守护进程/核心 PID 更新，无需重新进入页面。应用后通常需要重启守护进程。
+- **端口配置**:System 页面可修改 Mixed / Controller / Web 端口;占用显示 `Owned` 或 `Occupied by name (pid)`。启动期间尚未收到核心身份时，已检测到监听进程的端口显示中性的 `Checking owner…`。在 Linux 上，未提权的 TUI 无法确认占用者时显示 `Needs admin`。重启后，归属判断随守护进程/核心 PID 更新，无需重新进入页面。应用后通常需要重启守护进程。
 - **TUI 内更新 Mihari**：导航栏选中 System、按 Enter 进入之前检查 GitHub Releases，显示 `当前版本 -> 最新版本 available` 或 `当前版本 · Up to date`；以管理员/root 权限启动时可替换二进制、同步并重启已安装的系统服务副本、验证 daemon 版本，并自动进入更新后的 TUI。更新确认会将安全的非标准已安装构建标识显示为 `Unknown[标识]`，兼容性仍为未知；长内容可用 ↑/↓ 或 PgUp/PgDn 滚动，默认选择 Cancel。
-- **内核通道**:System 页面可在 mihomo 的 `stable` / `alpha` 通道之间切换。
+- **内核通道**:System 页面可在 mihomo 的 `stable` / `alpha` 通道之间切换。核心安装、更新、重装、切换通道或重启期间，mihomo core 信息行和操作行都会显示盲文运行动画与进度状态。动画标记添加在原有信息之前，操作成功或失败后消失；窄窗口优先显示动画，其余信息按可用宽度裁剪。
 - **自动版本检查**：导航栏选中 System、按 Enter 进入之前，每次都会检查 Mihari 和 core 当前通道。按 Enter 进入页面不会再次发起这两项检查，也不会取消已经在进行的检查。进入 Web GUI 时逐项检查所有支持的面板，包括尚未安装的面板。Core 与 Mihari 检查会显示带动画的 `Checking`，随后显示 `当前版本 -> 最新版本 available`、`Up to date` 或 `Check failed`；这些 System 检查不会阻断其他 System 操作。Web GUI 面板检查进行时，Latest 使用同一个 badge。面板的成功结果在本次 TUI 会话内缓存 5 分钟。Mihari 或 core 检查失败时，下次用导航栏再次选中 System 会重试。core 安装/通道切换，以及面板安装/更新/回滚/重装/卸载成功后，立即刷新对应版本检查。检查只获取元数据，安装仍需确认。
+
+Mihari 更新下载与校验期间显示 `Preparing` 盲文动画，并保留当前版本和通道。确认后恢复终端，在替换二进制和同步安装期间显示 `Updating Mihari` 盲文动画；进入新版 TUI 前报告成功、失败或需要恢复。输出重定向时使用普通状态行。
 
 Windows 更新可使用同一用户的非管理员令牌查询用户目录中的安装版本，包括默认的 AppData 安装位置。若降权 UAC 令牌只能识别身份，Mihari 会在核验同一用户、同一登录会话和非管理员权限后，使用桌面 Shell 的令牌。目录权限不安全或无法取得通过核验的令牌时，版本仍显示 unknown；版本查询不会以管理员权限执行用户可写的文件。
 
 单个无 CGO 的静态二进制(< 15 MB)即包含全部功能,内置 GitHub Releases 自动更新与本地 GeoIP 解析。
+
+本地 YAML 使用 `mihari sub add NAME --file PATH` 添加，使用 `mihari sub set ID --file PATH` 修改同类型来源。PATH 必须为绝对路径或规范 `file://` URI，支持 Windows 盘符与 Linux/macOS POSIX 路径。Subscriptions 和 Setup 表单提供 **Source ‹ URL / Local file ›** 开关；切换清空来源输入，文件模式隐藏 HTTP 代理配置。已有条目类型固定。
+
+daemon 使用自身权限读取普通文件，最多 16 MiB，仅缓存原始主 YAML；Mihari 设置覆盖另行生成的运行配置，不修改原文件。支持手动更新、定时刷新和关闭自动刷新，不监听主 YAML。本地相对输入引用按上次成功读取的实际文件目录解析（符号链接使用目标目录）；修改来源后旧缓存保留旧目录，成功刷新才替换。
+
+URL provider 继续由 mihomo 下载。本地文件引用直接交给 mihomo，不复制或备份；原生 watcher 可能在关闭订阅自动刷新时仍改变运行，文件移动、删除或权限变化可能导致运行/重启失败，主 YAML 回滚不能恢复引用文件，部分原生操作可能写入引用文件。核心校验和运行通过 `SKIP_SAFE_PATH_CHECK=true` 允许任意引用路径，但仍受 daemon/核心 OS 权限限制；核心身份校验与 loopback controller 边界保留。
+
+本地或远程创建新订阅时，先校验，再对文件引用列出位置/路径和后果，默认取消。非交互/JSON 必须提供 `--allow-file-references`，否则退出码为 2 并提示该 flag。后续编辑、更新、切换和启动不重复询问。初次获取或校验失败不创建条目；响应丢失仍须检查服务器状态再决定重试。普通响应仅增加派生 `source_type=file`，完整来源沿用认证 reveal 接口。本地 catalog 含 `cache-base-dir`，旧版本无法加载，降级前需移除本地条目或恢复兼容备份。
 
 代理节点测速会读取 provider 节点，并在需要时调用 mihomo 的 provider 专用接口。同名节点在每个组内合并显示、共享测速结果：优先全局普通节点，否则按 provider 名排序选择首个匹配项。TUI 启动后的首次成功检查会对重名弹窗提示，测速来源可能与组实际选中的来源不同。provider 读取对瞬时故障最多尝试三次；持续失败时保留旧列表，显示 **Stale data** 和关键原因，恢复后自动清除提示。CLI/TUI 与 daemon 应配套升级。
 
@@ -150,6 +160,8 @@ TUI 节点测速进行中时，卡片在协议名称旁仅显示盲文加载动�
 
 TUI 订阅表格的 Name 和 Traffic 列按内容分配宽度，分别最多占 40 和 24 个终端字符格；多余空间留在右侧，窄屏优先隐藏次要字段。
 
+本地文件读取传递取消并限制内容大小，但文件系统元数据查询/打开可能阻塞在 OS 内，尤其是不可达的 UNC/SMB 共享或网络挂载。取消及执行预算无法强行中断这些同步系统调用。
+
 订阅下载 Mode 将 `auto` 显示为 **PROXY w Fallback to DIRECT**。回退覆盖主订阅 YAML 的连接超时和成功响应正文读取超时等可重试网络错误；HTTP 错误、无效文档不触发回退。每次代理/直连尝试保留 30 秒预算，daemon 的 Add/Refresh 整次执行上限为 120 秒，CLI/TUI 每条等待最多 180 秒以容纳有界回滚和响应。更短的调用方 deadline 与主动取消仍优先，批量刷新逐条计时。窄列表必要时整列隐藏 Mode，进入详情可查看完整值。Provider 下载策略及 Proxies 页 Routing Mode 独立于此设置。
 
 **System → Network** 在 daemon 启动时应用保存的系统代理或 TUN 状态期间显示橙色 **Applying…** 动画 badge，开启与关闭目标均适用。该次启动应用完成、失败或取消后停止动画。页面导航和手动操作保持可用；此标记不代表自动修复状态漂移。
@@ -157,6 +169,8 @@ TUI 订阅表格的 Name 和 Traffic 列按内容分配宽度，分别最多占 
 mihomo HTTP 失败的原始报错与上游状态会写入诊断日志，范围包括 gateway 和 WebSocket 握手。日志、导出及本地 CLI/TUI 错误汇报均不脱敏，保留错误自带的凭据、URL、路径与配置片段。CLI 分段展示概要、错误分类和原始详情，JSON 增加可选诊断和 warnings，业务退出码保持不变。TUI 所有页面均可按 F2 打开统一诊断历史，滚动查看详情并复制原文。终端控制字符仅在显示时转义。
 
 F2 每次发生保留独立记录，以级别颜色和选中高亮帮助浏览。宽终端左右显示列表和详情，窄终端上下排列。Tab 切换窗格，方向键、PgUp/PgDn、Home/End 导航，c 复制原始详情，Esc 返回；新记录不会抢走当前选择。Web gateway 允许来自 mihomo 的单条消息最大 1 MiB，与 mihomo 流客户端一致；浏览器发送方向仍限制为 32 KiB。
+
+F2 的剪贴板写入在后台执行，保持弹窗可操作。OSC 52 仅表示请求已交给终端，不确认复制成功，并保留历史不可用等提示。在 Linux 使用 sudo 启动时，Wayland 复制优先使用发起会话指定的可用显示 socket；未找到时，自动发现要求只有一个可用 socket。提权 helper `runuser` 只从固定的绝对系统路径查找，包括系统 profile。其他本地会话使用系统剪贴板工具。
 
 更新后保留已退役的 Mihari/mihomo 二进制及已完成事务残留，留到后续启动尝试清理。daemon 清理其管理的核心文件；daemon 与 TUI 启动还会尝试清理当前 Mihari 程序旁的残留。占用或其他清理失败保留到下次启动重试，并在 **F2** 显示 warning，不影响更新或启动成功。同次运行可连续更新核心。普通 CLI 查询不触发删除；中断事务的恢复材料和用户备份会保留。
 
@@ -172,7 +186,7 @@ F2 每次发生保留独立记录，以级别颜色和选中高亮帮助浏览�
 | 系统代理 / TUN | `mihari sysproxy enable` · `mihari sysproxy enable --force` · `mihari tun enable` · `mihari tun enable --force` |
 | Web 面板 | `mihari panel list` · `mihari panel open` |
 | 服务控制 | `mihari service status` · `mihari service stop` |
-| 全量卸载 | System 页 `Completely Uninstall Mihari` · `mihari service uninstall --purge --yes` · `mihari service uninstall --purge --yes --force` |
+| 全量卸载 | System 页 `Completely Uninstall Mihari` · `mihari service uninstall --purge --yes` · `mihari service uninstall --purge --yes --force` · `mihari service uninstall --purge --yes --delete-unmatched-command` |
 | 更新 mihari | System 页 `Update Mihari` · `mihari self update` |
 
 完整命令参考见 [docs/commands.md](docs/commands.md),架构与安全机制见 [docs/architecture.md](docs/architecture.md)。
@@ -201,7 +215,7 @@ TUI **Subs** 页按 Enter 打开可编辑详情，`a` 添加订阅。Tab/Shift+T
 
 修改 URL 会保留旧缓存和 InUse，不立即下载或 reload；**Outdated** 表示缓存来自旧 URL，仍可离线 Use。修改单条 interval 会重置下次刷新时间，并持久标记 **Expired**，直到刷新成功（包括有效 304）；Disabled、Failed、Missing、Outdated 等更高优先级状态仍优先显示。关闭 Auto refresh 时 Next 显示 **Manual**。
 
-保存等待结果后关闭。revision 冲突会询问是否仅覆盖本次实际修改的字段。结果未知时先只读查询操作和当前状态，不自动重放保存；**Submit again** 需要再次确认，添加场景可能产生重复条目。关闭界面不代表撤销保存。已经添加但首次下载失败时，返回列表选中该订阅，按 `r` 重试下载。
+保存等待结果后关闭。revision 冲突会询问是否仅覆盖本次实际修改的字段。结果未知时先只读查询操作和当前状态，不自动重放保存；**Submit again** 需要再次确认，添加场景可能产生重复条目。关闭界面不代表撤销保存。首次获取或校验失败不创建条目；已有订阅刷新失败时保留旧缓存，可按 `r` 重试。
 
 TUI 与 daemon 必须配套升级，不保证混用版本。升级前停止 daemon，按实际布局备份完整业务数据（Unix B/D，或 Windows/私有 P），将 catalog、缓存、settings/state、运行配置作为一致整体保存。旧二进制无法读取新增 catalog 字段，不支持直接降级；回退二进制时应停机恢复兼容的完整备份，不通过单独删除 YAML 字段降级。
 

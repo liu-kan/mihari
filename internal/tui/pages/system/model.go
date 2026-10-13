@@ -16,8 +16,8 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
 	"github.com/mihari-proxy/mihari/internal/app"
+	controlclient "github.com/mihari-proxy/mihari/internal/control/client"
 	"github.com/mihari-proxy/mihari/internal/control/protocol"
 	"github.com/mihari-proxy/mihari/internal/diagnostics"
 	"github.com/mihari-proxy/mihari/internal/elevate"
@@ -117,6 +117,7 @@ type ServiceController interface {
 // Uninstaller previews the fixed local roots before a complete uninstall.
 type Uninstaller interface {
 	Preview(context.Context) ([]app.UninstallTarget, error)
+	UnmatchedCommand(context.Context) (app.UnmatchedCommandFile, bool, error)
 }
 
 type row struct {
@@ -251,6 +252,19 @@ const (
 	serviceRestart
 )
 
+const coreProgressInterval = 200 * time.Millisecond
+
+type coreProgressObserver interface {
+	OperationStatus(context.Context, string) (protocol.OperationStatus, error)
+}
+
+type coreProgressMsg struct {
+	id   string
+	line string
+}
+
+type coreProgressTickMsg struct{ id string }
+
 // rowSpinTickMsg advances braille frames while a System row action is in flight.
 type rowSpinTickMsg struct {
 	t   time.Time
@@ -326,6 +340,7 @@ type Model struct {
 	coreVersion           coreVersionState
 	channelDiagnostic     tea.Cmd
 	writeClipboard        func(string) error
+	copyResult            func(string) ui.CopyResult
 	ctx                   context.Context
 	client                Client
 	service               ServiceController
@@ -373,18 +388,22 @@ type Model struct {
 	clientLogDir          string
 	exportLogDir          string
 
-	serviceStatus service.StatusKind
-	serviceLoaded bool
-	elevated      bool
-	focusID       string
-	detail        *row
-	pending       bool
-	pendingRow    string // row id showing in-row braille progress
-	pendingNote   string // short status text next to the row (e.g. Installing)
+	serviceStatus       service.StatusKind
+	serviceLoaded       bool
+	elevated            bool
+	focusID             string
+	detail              *row
+	pending             bool
+	pendingRow          string // row id showing in-row braille progress
+	pendingNote         string // short status text next to the row (e.g. Installing)
+	coreProgressID      string
+	coreProgressStarted time.Time
+	coreProgressLine    string
 	// Sticky outcome after an action finishes (cleared on page leave or re-run).
 	outcomeRow       string
 	outcomeOK        bool   // true=Done (green), false=Failed (red)
-	outcomeDetail    string // failure reason (shown under title + next to Failed)
+	outcomeSent      bool   // terminal handoff; not a confirmed copy
+	outcomeDetail    string // failure reason, or the sent notice
 	rowSpinClock     time.Time
 	rowSpinning      bool
 	rowSpinGen       uint64
@@ -403,6 +422,9 @@ type Model struct {
 	portProbeNeeded  bool
 	listenFree       func(string) bool
 	lookupOccupant   func(string) (platform.TCPOccupant, bool)
+	// revealsListener overrides whether elevation can name a hidden occupant.
+	// Nil uses platform.ElevationRevealsListener.
+	revealsListener func() bool
 }
 
 // RestartRequiredMsg tells the root shell to show the existing restart dialog.
@@ -518,6 +540,25 @@ func (m *Model) SetUninstaller(uninstaller Uninstaller) {
 	m.uninstaller = uninstaller
 }
 
+func completeUninstallDecision(uninstaller Uninstaller) tea.Msg {
+	if uninstaller == nil {
+		return ui.CompleteUninstallConfirmedMsg{}
+	}
+	file, ok, err := uninstaller.UnmatchedCommand(context.Background())
+	if err != nil || !ok {
+		if err != nil {
+			return uninstallPreviewMsg{err: err}
+		}
+		return ui.CompleteUninstallConfirmedMsg{}
+	}
+	return ui.ActionIntentMsg{
+		Action: ui.ActionCompleteUninstall, Page: ui.PageSystem, Key: ui.CompleteUninstallCommandKey,
+		Title: ui.DeleteUnmatchedCommandTitle, Object: diagnostics.EscapeTerminal(file.Path), Impact: diagnostics.EscapeTerminal(file.Reason), Rollback: ui.DeleteUnmatchedCommandRollback,
+		Execute: func() tea.Msg { return ui.CompleteUninstallConfirmedMsg{DeleteUnmatchedCommand: true} },
+		Cancel:  func() tea.Msg { return ui.CompleteUninstallConfirmedMsg{} },
+	}
+}
+
 // SetOpenBrowser injects the browser launcher (tests and headless environments).
 func (m *Model) SetOpenBrowser(open func(string) error) {
 	if open != nil {
@@ -597,16 +638,30 @@ func (m *Model) directoryCopyAvailable(rowID string) bool {
 }
 
 func (m *Model) copyDirectoryRow(rowID, path string) tea.Cmd {
-	write := m.writeClipboard
-	if write == nil {
-		write = clipboard.WriteAll
+	var result ui.CopyResult
+	switch {
+	case m.copyResult != nil:
+		result = m.copyResult(path)
+	case m.writeClipboard != nil:
+		result = ui.CopyPath(ui.CopyRequest{Text: path, Write: m.writeClipboard})
+	default:
+		result = ui.CopyText(path)
 	}
-	if err := write(path); err != nil {
-		m.markRowOutcome(rowID, false, ui.ExportCopyFailed)
+	switch result.Kind {
+	case ui.CopySentToTerminal:
+		m.markRowSent(rowID, ui.CopySentNotice)
+		return result.Command
+	case ui.CopyConfirmed:
+		m.markRowOutcome(rowID, true, "")
+		return m.scheduleOutcomeFade(rowID)
+	default:
+		err := result.Err
+		if err == nil {
+			err = errors.New("clipboard copy failed")
+		}
+		m.markRowOutcome(rowID, false, ui.CopyFailureText(ui.ExportCopyFailed, err))
 		return m.localFailure("clipboard.write", ui.ExportCopyFailed, err)
 	}
-	m.markRowOutcome(rowID, true, "")
-	return m.scheduleOutcomeFade(rowID)
 }
 
 func (m *Model) ID() ui.PageID { return ui.PageSystem }
@@ -767,6 +822,7 @@ func (m *Model) checkMihariVersion() tea.Cmd {
 	if m.outcomeRow == rowMihariUpdate {
 		m.outcomeRow = ""
 		m.outcomeOK = false
+		m.outcomeSent = false
 		m.outcomeDetail = ""
 		m.lastError = ""
 	}
@@ -946,6 +1002,8 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 		m.selfCheckLoaded = true
 		if m.outcomeRow == rowMihariUpdate {
 			m.outcomeRow = ""
+			m.outcomeOK = false
+			m.outcomeSent = false
 			m.outcomeDetail = ""
 			m.lastError = ""
 		}
@@ -1076,7 +1134,12 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 			m.invalidateMihariCheck()
 		}
 		m.beginRowPending(typed.Action)
-		return m, m.rowSpinCmdIfNeeded()
+		spin := m.rowSpinCmdIfNeeded()
+		poll := m.beginCoreInstallProgress(typed.Action)
+		if poll == nil {
+			return m, spin
+		}
+		return m, tea.Batch(spin, poll)
 	case startRowSpinMsg:
 		if typed.gen != m.rowSpinGen || !m.hasRowProgress() {
 			if typed.gen == m.rowSpinGen {
@@ -1099,6 +1162,20 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 		return m, tea.Tick(rowSpinInterval, func(t time.Time) tea.Msg {
 			return ui.PageResultMsg{Page: ui.PageSystem, Result: rowSpinTickMsg{t: t, gen: typed.gen}}
 		})
+	case coreProgressMsg:
+		if !m.pending || typed.id == "" || typed.id != m.coreProgressID {
+			return m, nil
+		}
+		m.coreProgressLine = typed.line
+		id := m.coreProgressID
+		return m, tea.Tick(coreProgressInterval, func(time.Time) tea.Msg {
+			return ui.PageResultMsg{Page: ui.PageSystem, Result: coreProgressTickMsg{id: id}}
+		})
+	case coreProgressTickMsg:
+		if !m.pending || typed.id == "" || typed.id != m.coreProgressID {
+			return m, nil
+		}
+		return m, m.pollCoreProgress()
 	case startOutcomeFadeMsg:
 		return m, tea.Tick(outcomeFadeInterval, func(time.Time) tea.Msg {
 			// outcomeFadeMsg has the same shape as startOutcomeFadeMsg; convert
@@ -1113,6 +1190,7 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 		}
 		m.outcomeRow = ""
 		m.outcomeOK = false
+		m.outcomeSent = false
 		m.outcomeDetail = ""
 		return m, nil
 	case actionStartMsg:
@@ -1156,6 +1234,7 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 			m.markRowOutcome(rowCompleteUninstall, false, uninstallPreviewDetail(typed.err))
 			return m, m.rowSpinCmdIfNeeded()
 		}
+		uninstaller := m.uninstaller
 		return m, func() tea.Msg {
 			paths := uninstallTargetPaths(typed.targets)
 			return ui.ActionIntentMsg{
@@ -1165,7 +1244,7 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 					return ui.ActionIntentMsg{
 						Action: ui.ActionCompleteUninstall, Page: ui.PageSystem, Key: ui.CompleteUninstallConfirmKey,
 						Title: ui.CompleteUninstallConfirmTitle, Object: paths, Impact: ui.CompleteUninstallConfirmImpact, Rollback: ui.CompleteUninstallRollback,
-						Execute: func() tea.Msg { return ui.CompleteUninstallConfirmedMsg{} },
+						Execute: func() tea.Msg { return completeUninstallDecision(uninstaller) },
 					}
 				},
 			}
@@ -1422,16 +1501,28 @@ func (m *Model) buildSectionContent() (lines []string, focusStart, focusEnd int)
 			value = m.loggingLevelEditorView(clock)
 		case m.editID == item.id:
 			value = m.editInput.View()
+		case item.id == rowCore && m.pending && m.pendingNote != "" &&
+			(m.pendingRow == rowCoreUpdate || m.pendingRow == rowCoreReinstall || m.pendingRow == rowCoreChannel || m.pendingRow == rowCoreRestart):
+			note := valueOr(m.coreProgressLine, m.pendingNote)
+			value = ui.RenderStatusChip(m.theme, ui.StatusChipPending, ui.SpinnerLabel(clock, note)) + "  " + value
+		case m.pending && m.pendingRow == item.id && m.coreProgressLine != "":
+			value = ui.RenderStatusChip(m.theme, ui.StatusChipPending, ui.SpinnerLabel(clock, m.coreProgressLine))
 		case m.pending && m.pendingRow == item.id && m.pendingNote != "":
 			value = ui.RenderStatusChip(m.theme, ui.StatusChipPending, ui.SpinnerLabel(clock, m.pendingNote))
+			if item.id == rowMihariUpdate {
+				value += "  " + m.theme.Muted.Render(valueOr(m.currentVersion, ui.UnknownLabel)+"  "+m.currentMihariChannel())
+			}
 		case item.id == rowCoreUpdate && m.coreVersion.checking:
 			value = ui.RenderStatusChip(m.theme, ui.StatusChipPending, ui.SpinnerLabel(clock, ui.MihariProgressChecking))
 		case item.id == rowMihariUpdate && m.selfChecking:
 			value = ui.RenderStatusChip(m.theme, ui.StatusChipPending, ui.SpinnerLabel(clock, ui.MihariProgressChecking))
 		case m.outcomeRow == item.id:
-			if m.outcomeOK {
+			switch {
+			case m.outcomeSent:
+				value = ui.RenderCopySentLines(m.theme.BrightYellow)
+			case m.outcomeOK:
 				value = ui.RenderStatusChip(m.theme, ui.StatusChipDone, ui.DoneLabel)
-			} else {
+			default:
 				value = ui.RenderStatusChip(m.theme, ui.StatusChipFailed, ui.FailedLabel)
 				if m.outcomeDetail != "" {
 					value += "  " + m.theme.Danger.Render(ui.TruncateVisible(m.outcomeDetail, 48))
@@ -1665,7 +1756,11 @@ func (m *Model) portRow(id, label, addr string, ownerPID int) row {
 	if status != "" {
 		value += "  " + status
 	}
-	detail := fmt.Sprintf("%s\n%s", valueOr(addr, ui.MissingValue), ui.FormatPortHoldLabel(hold))
+	statusText := ui.FormatPortHoldLabel(hold)
+	if hold.Kind == ui.PortHoldNeedsAdmin {
+		statusText = ui.ServiceElevationRequired
+	}
+	detail := fmt.Sprintf("%s\n%s", valueOr(addr, ui.MissingValue), statusText)
 	if hold.Kind == ui.PortHoldChecking && hold.Process != "" {
 		detail += fmt.Sprintf("\nHolder process %s", hold.Process)
 	}
@@ -2001,6 +2096,7 @@ func (m *Model) beginRowPending(action ui.Action) {
 	// New run replaces any sticky Done/Failed on this page.
 	m.outcomeRow = ""
 	m.outcomeOK = false
+	m.outcomeSent = false
 	m.outcomeDetail = ""
 	m.lastError = ""
 }
@@ -2009,6 +2105,70 @@ func (m *Model) clearRowPending() {
 	m.pending = false
 	m.pendingRow = ""
 	m.pendingNote = ""
+	m.clearCoreInstallProgress()
+}
+
+func (m *Model) clearCoreInstallProgress() {
+	m.coreProgressID = ""
+	m.coreProgressStarted = time.Time{}
+	m.coreProgressLine = ""
+}
+
+func coreInstallProgressAction(action ui.Action) bool {
+	switch action {
+	case ui.ActionUpdateCore, ui.ActionReinstallCore, ui.ActionSwitchCoreChannel:
+		return true
+	default:
+		return false
+	}
+}
+
+// beginCoreInstallProgress arms a poll for an install that already has an operation id.
+// Restart and every other row keep the short pending note.
+func (m *Model) beginCoreInstallProgress(action ui.Action) tea.Cmd {
+	if !coreInstallProgressAction(action) {
+		m.clearCoreInstallProgress()
+		return nil
+	}
+	if m.coreProgressID == "" {
+		m.coreProgressLine = ""
+		return nil
+	}
+	if _, ok := m.client.(coreProgressObserver); !ok {
+		m.coreProgressLine = ""
+		return nil
+	}
+	m.coreProgressStarted = time.Now()
+	m.coreProgressLine = protocol.FormatCoreInstallProgress(nil, 0)
+	return m.pollCoreProgress()
+}
+
+// pollCoreProgress reads one operation snapshot. The next read is scheduled from Update.
+func (m *Model) pollCoreProgress() tea.Cmd {
+	observer, ok := m.client.(coreProgressObserver)
+	if !ok || m.coreProgressID == "" {
+		return nil
+	}
+	parent := m.ctx
+	id, started := m.coreProgressID, m.coreProgressStarted
+	return func() tea.Msg {
+		if parent == nil {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+		defer cancel()
+		var progress *protocol.OperationProgress
+		if status, err := controlclient.ObserveOperationProgress(ctx, observer, id); err == nil {
+			progress = status.Progress
+		}
+		elapsed := time.Duration(0)
+		if !started.IsZero() {
+			elapsed = time.Since(started)
+		}
+		return ui.PageResultMsg{Page: ui.PageSystem, Result: coreProgressMsg{
+			id: id, line: protocol.FormatCoreInstallProgress(progress, elapsed),
+		}}
+	}
 }
 
 // outcomeRowID prefers the in-flight pending row, then an explicit fallback, then focus.
@@ -2029,6 +2189,7 @@ func (m *Model) markRowOutcome(rowID string, ok bool, detail string) {
 	}
 	m.outcomeRow = rowID
 	m.outcomeOK = ok
+	m.outcomeSent = false
 	if ok {
 		m.outcomeDetail = ""
 		m.lastError = ""
@@ -2038,15 +2199,31 @@ func (m *Model) markRowOutcome(rowID string, ok bool, detail string) {
 	m.lastError = m.outcomeDetail
 }
 
+func (m *Model) markRowSent(rowID, notice string) {
+	if m == nil || rowID == "" {
+		return
+	}
+	m.outcomeRow = rowID
+	m.outcomeOK = false
+	m.outcomeSent = true
+	m.outcomeDetail = notice
+	m.lastError = ""
+	m.ensureFocusVisible()
+}
+
 // ClearDone drops sticky Done/Failed badges (call when leaving the System page).
 func (m *Model) ClearDone() {
 	m.outcomeRow = ""
 	m.outcomeOK = false
+	m.outcomeSent = false
 	m.outcomeDetail = ""
 	m.lastError = ""
 }
 
 func (m *Model) visibleErrorDetail() string {
+	if m.outcomeSent {
+		return strings.TrimSpace(m.lastError)
+	}
 	if m.outcomeRow != "" && !m.outcomeOK && m.outcomeDetail != "" {
 		return m.outcomeDetail
 	}
@@ -2396,6 +2573,9 @@ func (m *Model) openPanelBrowser(panelID string) tea.Cmd {
 // daemon/core identity. Owner snapshots and asynchronous probes arrive independently.
 func (m *Model) reconcilePortOwners() {
 	for id, hold := range m.portHolds {
+		if hold.Kind == ui.PortHoldNeedsAdmin {
+			continue
+		}
 		owner := m.core.PID
 		if id == rowWeb {
 			owner = m.status.PID
@@ -2435,6 +2615,14 @@ func (m *Model) probePortHolds() tea.Cmd {
 	if lookup == nil {
 		lookup = platform.LookupTCPOccupant
 	}
+	elevatedFn := m.isElevated
+	if elevatedFn == nil {
+		elevatedFn = elevate.IsElevated
+	}
+	revealsFn := m.revealsListener
+	if revealsFn == nil {
+		revealsFn = platform.ElevationRevealsListener
+	}
 	addrs := map[string]string{
 		rowMixed:      m.onboarding.MixedAddr,
 		rowController: m.onboarding.ControllerAddr,
@@ -2446,6 +2634,8 @@ func (m *Model) probePortHolds() tea.Cmd {
 		rowWeb:        m.status.PID,
 	}
 	return func() tea.Msg {
+		elevated := elevatedFn()
+		reveals := revealsFn()
 		holds := make(map[string]ui.PortHold, 3)
 		var failures []error
 		for id, addr := range addrs {
@@ -2458,8 +2648,14 @@ func (m *Model) probePortHolds() tea.Cmd {
 			if !free {
 				occ, _ = lookup(addr)
 			}
-			holds[id] = ui.ClassifyPortHold(free, occ.PID, occ.Process, owners[id])
-			if err != nil && !(owners[id] > 0 && occ.PID == owners[id]) {
+			hold := ui.ClassifyPortHold(free, occ.PID, occ.Process, owners[id])
+			// An ordinary Linux user cannot name a root listener. The row explains
+			// that, so the expected bind failure is not a diagnostic error.
+			if hold.Kind == ui.PortHoldUnknown && err != nil && ui.AddrInUse(err) && !elevated && reveals {
+				hold.Kind = ui.PortHoldNeedsAdmin
+			}
+			holds[id] = hold
+			if err != nil && hold.Kind != ui.PortHoldNeedsAdmin && !(owners[id] > 0 && occ.PID == owners[id]) {
 				failures = append(failures, fmt.Errorf("probe %s endpoint %q: %w", id, addr, err))
 			}
 		}
@@ -2533,6 +2729,7 @@ func (m *Model) clearLoggingOutcome(rowID string) {
 	detail := m.outcomeDetail
 	m.outcomeRow = ""
 	m.outcomeOK = false
+	m.outcomeSent = false
 	m.outcomeDetail = ""
 	if m.lastError == detail {
 		m.lastError = ""
@@ -2848,6 +3045,7 @@ func (m *Model) confirmSwitchCoreChannel(target string) tea.Cmd {
 		return nil
 	}
 	revision, operationID := m.currentRevision(), m.newOperationID()
+	m.coreProgressID = operationID
 	return func() tea.Msg {
 		return ui.ActionIntentMsg{
 			Action: ui.ActionSwitchCoreChannel, Page: ui.PageSystem, Capability: protocol.CapabilityCore,
@@ -2877,6 +3075,11 @@ func (m *Model) confirmAction(kind actionKind) tea.Cmd {
 	if kind == actionReinstall {
 		title, impact, rollback = ui.ReinstallCoreTitle, ui.ReinstallCoreImpact, ui.ReinstallCoreRollback
 		action, capability = ui.ActionReinstallCore, protocol.CapabilityCoreReinstall
+	}
+	if kind == actionUpdate || kind == actionReinstall {
+		m.coreProgressID = operationID
+	} else {
+		m.clearCoreInstallProgress()
 	}
 	return func() tea.Msg {
 		return ui.ActionIntentMsg{
