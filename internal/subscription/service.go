@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -232,7 +233,13 @@ func (s *Service) CommitRefresh(prepared PreparedRefresh) (Receipt, error) {
 	return s.commitRefreshLocked(prepared, s.catalog.Clone())
 }
 
-func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) (Receipt, error) {
+func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) (receipt Receipt, err error) {
+	keepCommitted := false
+	defer func() {
+		if err != nil && !keepCommitted {
+			s.catalog = before.Clone()
+		}
+	}()
 	index := s.catalog.Index(prepared.profileID)
 	if index < 0 || s.catalog.Profiles[index].Version != prepared.profileVersion {
 		return Receipt{}, protocol.APIError{Code: protocol.CodeRevisionConflict, Message: "subscription changed while refresh was in progress"}
@@ -281,6 +288,21 @@ func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) 
 		// catalog metadata as well as bytes so cached relative paths stay paired.
 		if restoreErr := s.saveCatalog(s.catalogPath, before); restoreErr != nil {
 			err = errors.Join(err, fmt.Errorf("restore subscription catalog: %w", restoreErr))
+			durable, readErr := Load(s.catalogPath)
+			if readErr != nil {
+				return Receipt{}, errors.Join(err, fmt.Errorf("inspect subscription catalog after failed restore: %w", readErr))
+			}
+			if reflect.DeepEqual(durable, after) {
+				// The new catalog remains committed: retain its matching bytes
+				// and publish the same generation to in-process readers.
+				s.catalog = durable
+				keepCommitted = true
+				return Receipt{}, err
+			}
+			if !reflect.DeepEqual(durable, before) {
+				return Receipt{}, errors.Join(err, errors.New("subscription catalog changed during failed restore"))
+			}
+
 		}
 		return Receipt{}, s.failAfterRestore(err, cachePath, cacheBefore, hadCache, wroteCache)
 	}

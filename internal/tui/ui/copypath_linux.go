@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -10,8 +11,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-
-	"github.com/atotto/clipboard"
+	"syscall"
+	"time"
 )
 
 func sshAncestor() bool {
@@ -44,7 +45,11 @@ func writeFeedbackClipboard(text string) error {
 	if err, handled := writeInvokingUserClipboard(text); handled {
 		return err
 	}
-	return clipboard.WriteAll(text)
+	argv, err := linuxClipboardCommand(os.Getenv("WAYLAND_DISPLAY") != "", exec.LookPath)
+	if err != nil {
+		return err
+	}
+	return runUserClipboard(argv, text)
 }
 
 func writeInvokingUserClipboard(text string) (error, bool) {
@@ -69,6 +74,12 @@ func writeInvokingUserClipboard(text string) (error, bool) {
 // background server keeps the inherited write end open, and waiting on that
 // pipe would block until some other client replaces the clipboard.
 func runUserClipboard(argv []string, text string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return runUserClipboardContext(ctx, argv, text)
+}
+
+func runUserClipboardContext(ctx context.Context, argv []string, text string) error {
 	if len(argv) == 0 {
 		return errors.New("clipboard command is missing")
 	}
@@ -81,11 +92,23 @@ func runUserClipboard(argv []string, text string) error {
 		_ = output.Close()
 		_ = os.Remove(name)
 	}()
-	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = time.Second
 	cmd.Stdin = strings.NewReader(text)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	runErr := cmd.Run()
+	if runErr != nil && ctx.Err() != nil {
+		runErr = errors.Join(runErr, ctx.Err())
+	}
 	if _, seekErr := output.Seek(0, io.SeekStart); seekErr != nil {
 		if runErr != nil {
 			return runErr
@@ -101,4 +124,33 @@ func runUserClipboard(argv []string, text string) error {
 		return fmt.Errorf("%w: %s", runErr, detail)
 	}
 	return readErr
+}
+
+// linuxClipboardCommand preserves the pinned clipboard backend preference.
+// Selection is injected so tests never invoke the user's desktop utilities.
+func linuxClipboardCommand(wayland bool, lookup func(string) (string, error)) ([]string, error) {
+	type backend struct {
+		args      []string
+		companion string
+	}
+	backends := []backend{}
+	if wayland {
+		backends = append(backends, backend{[]string{"wl-copy"}, "wl-paste"})
+	}
+	backends = append(backends, backend{[]string{"xclip", "-in", "-selection", "clipboard"}, ""}, backend{[]string{"xsel", "--input", "--clipboard"}, ""}, backend{[]string{"termux-clipboard-set"}, "termux-clipboard-get"}, backend{[]string{"clip.exe"}, "powershell.exe"})
+	for _, b := range backends {
+		path, err := lookup(b.args[0])
+		if err != nil {
+			continue
+		}
+		if b.companion != "" {
+			if _, err := lookup(b.companion); err != nil {
+				continue
+			}
+		}
+		argv := append([]string(nil), b.args...)
+		argv[0] = path
+		return argv, nil
+	}
+	return nil, errors.New("no clipboard utilities available; install xclip, xsel or wl-clipboard")
 }
