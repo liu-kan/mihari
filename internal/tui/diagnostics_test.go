@@ -19,6 +19,66 @@ import (
 
 func diagnosticKey(code rune) tea.KeyPressMsg { return tea.KeyPressMsg(tea.Key{Code: code}) }
 
+func TestDiagnostics_CopyRunsOutsideUpdate(t *testing.T) {
+	model := NewModel()
+	w := model.diagnosticWindow
+	w.open = true
+	w.selected = "copy-record"
+	w.pinned = protocol.Diagnostic{ID: w.selected, State: protocol.DiagnosticAvailable, Detail: "fixture body"}
+	called := false
+	w.copyText = func(body string) error {
+		called = true
+		if body != "fixture body" {
+			t.Fatalf("body=%q", body)
+		}
+		return nil
+	}
+	cmd, consumed := model.updateDiagnostics(diagnosticKey('c'))
+	if !consumed || cmd == nil || called {
+		t.Fatalf("copy performed in Update: called=%v", called)
+	}
+	msg := cmd()
+	model.updateDiagnostics(msg)
+	if !called || w.copyStatus != "Copied" {
+		t.Fatalf("called=%v status=%q", called, w.copyStatus)
+	}
+}
+
+func TestDiagnostics_StaleCopyStillDispatchesTerminalCommand(t *testing.T) {
+	for _, open := range []bool{true, false} {
+		model := NewModel()
+		w := model.diagnosticWindow
+		w.open, w.generation, w.selected, w.copyStatus = open, 2, "new-record", "new-status"
+		called := false
+		cmd, consumed := model.updateDiagnostics(diagnosticCopyMsg{generation: 1, id: "old-record", kind: ui.CopySentToTerminal, command: func() tea.Msg { called = true; return nil }})
+		if !consumed || cmd == nil || w.copyStatus != "new-status" {
+			t.Fatalf("copy dropped or changed current status: open=%v status=%q", open, w.copyStatus)
+		}
+		cmd()
+		if !called {
+			t.Fatal("terminal command not dispatched")
+		}
+	}
+}
+
+func TestDiagnostics_TerminalCopyKeepsHistoryNotices(t *testing.T) {
+	w := newDiagnosticWindow()
+	w.copyStatus = ui.CopySentNotice
+	w.remoteNotice = "Remote history unavailable"
+	w.localNotice = "Older local records evicted"
+	w.selected = "notice-record"
+	w.pinned = protocol.Diagnostic{State: protocol.DiagnosticAvailable, Detail: strings.Repeat("fixture line\n", 100)}
+	view := w.view(180, 18)
+	for _, want := range []string{w.remoteNotice, w.localNotice, ui.CopySentLines()[0]} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("missing %q in %s", want, view)
+		}
+	}
+	if rows := strings.Count(view, "\n") + 1; rows > 18 {
+		t.Fatalf("dialog exceeds terminal: %d rows", rows)
+	}
+}
+
 func TestDiagnosticsF2_PreservesInputAndUnderlyingConfirmation(t *testing.T) {
 	for _, page := range []ui.PageID{ui.PageSetup, ui.PageSystem} {
 		model := NewModel()

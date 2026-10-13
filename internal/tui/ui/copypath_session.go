@@ -1,9 +1,28 @@
 package ui
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 )
+
+func findRunuser(lookup func(string) (string, error)) (string, error) {
+	var failures []error
+	for _, path := range []string{
+		"/usr/sbin/runuser", "/usr/bin/runuser", "/sbin/runuser", "/bin/runuser",
+		"/usr/local/sbin/runuser", "/usr/local/bin/runuser",
+		"/run/current-system/sw/bin/runuser",
+		"/run/current-system/profile/sbin/runuser", "/run/current-system/profile/bin/runuser",
+	} {
+		found, err := lookup(path)
+		if err == nil {
+			return found, nil
+		}
+		failures = append(failures, err)
+	}
+	return "", errors.Join(failures...)
+}
 
 // sshAncestorFrom reports whether pid or one of its parents is sshd.
 func sshAncestorFrom(pid int, read func(int) (string, int, error)) bool {
@@ -62,11 +81,26 @@ func waylandDisplay(runtimeDir string) string {
 	if err != nil {
 		return ""
 	}
+	preferred := os.Getenv("WAYLAND_DISPLAY")
+	var display string
+	var sockets int
 	for _, entry := range entries {
 		name := entry.Name()
-		if validWaylandDisplay(name) {
+		if !validWaylandDisplay(name) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.Mode()&os.ModeSocket == 0 {
+			continue
+		}
+		if name == preferred || filepath.Join(runtimeDir, name) == preferred {
 			return name
 		}
+		sockets++
+		display = name
+	}
+	if sockets == 1 {
+		return display
 	}
 	return ""
 }
