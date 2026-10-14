@@ -44,11 +44,26 @@ func (s *Service) PrepareAdd(ctx context.Context, name, source, mode string) (Pr
 
 // CommitAdd publishes a prepared source and its first cache in one receipt.
 func (s *Service) CommitAdd(prepared PreparedAdd) (Receipt, error) {
+	return s.commitAdd(prepared, false)
+}
+
+// CommitAddAndActivate publishes the new profile and selection in one catalog receipt.
+func (s *Service) CommitAddAndActivate(prepared PreparedAdd) (Receipt, error) {
+	return s.commitAdd(prepared, true)
+}
+
+func (s *Service) commitAdd(prepared PreparedAdd, activate bool) (Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	before := s.catalog.Clone()
 	s.catalog.Profiles = append(s.catalog.Profiles, prepared.profile)
-	receipt, err := s.commitRefreshLocked(prepared.refresh, before)
+	if activate {
+		s.catalog.ActiveID = prepared.profile.ID
+	}
+	receipt, err := s.commitRefreshLocked(prepared.refresh, before, activate)
+	if activate {
+		return s.settleSetupCommitLocked(receipt, err)
+	}
 	if err != nil {
 		return Receipt{}, err
 	}
