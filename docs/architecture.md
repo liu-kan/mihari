@@ -105,7 +105,7 @@ TUI 进入 System/Web GUI 时通过带认证的本地控制接口 `GET /v1/core/
 
 - TUI 只通过 `internal/control/client` 经原生 IPC 控制面与本地守护进程通信。它从不打开 mihomo 控制器、从不接收控制器密钥。
 - TUI 的日志直接写入例外是经 `internal/logging` 在当前 UID 的 U/logs 追加/轮转固定 `mihari-tui.log*`（Windows/显式私有 P 保留单根）;不得写 `mihari.yaml`、订阅、token、面板或其他业务状态。日志配置变更仍只走 daemon 控制面。
-- System 页面 Logging 下方的 Maintenance 区提供 **Completely Uninstall Mihari**。两次确认框都默认 Cancel，并列出将清空的文件夹；与安装根程序字节一致的 PATH 命令文件也会列在其中。若该路径是普通文件，但与安装根程序字节不一致或安装根程序已缺失，两次确认之后再出现一次对话框，写明路径和原因，默认 Cancel（保留文件并继续卸载，服务和目录仍删除，但不宣称完全卸载成功，CLI 返回 `invalid_state`）；Confirm 才删除它。确认后先关闭 TUI 资源，再由已提权的本地卸载路径尝试删除列出的或本次同意删除的命令文件，然后停止并注销 OS 服务，再删除这些文件夹。Unix 上该文件删除失败则停止，服务和目录保持不变。Windows 上删除失败会留下该文件并继续清理，不以完全卸载成功结束，错误里给出一条退出后可复制的 `Remove-Item -LiteralPath` 命令。CLI `mihari service uninstall --purge --yes` 仍只删除白名单内的受管文件；整根删除需再加 `--force`。对不上的普通命令文件还要 `--delete-unmatched-command`；只有交互终端且不是 `--json` 时才询问 `Delete unmatched command file <路径>? [y/N]`。`--purge --yes` 本身不算同意。目录和符号链接不在这次确认里删除。普通 `service uninstall` 仍只注销服务。
+- System 页面 Logging 下方的 Maintenance 区提供 **Completely Uninstall Mihari**。两次确认框都默认 Cancel，并列出将清空的文件夹；与安装根程序字节一致的 PATH 命令文件也会列在其中。若该路径是普通文件，但与安装根程序字节不一致或安装根程序已缺失，两次确认之后再出现一次对话框，写明路径和原因，默认 Cancel（保留文件并继续卸载，服务和其他内容仍清理；保留的命令位于清理根内时，保留文件及必要父目录，清理同根其他内容和其他目标；`--force` 不替代单独命令删除同意；但不宣称完全卸载成功，CLI 返回 `invalid_state`）；Confirm 才删除它。确认后先关闭 TUI 资源，再由已提权的本地卸载路径尝试删除列出的或本次同意删除的命令文件，然后停止并注销 OS 服务，再删除这些文件夹。Unix 上该文件删除失败则停止，服务和目录保持不变。Windows 上删除失败会留下该文件并继续清理，不以完全卸载成功结束，错误里给出一条退出后可复制的 `Remove-Item -LiteralPath` 命令。CLI `mihari service uninstall --purge --yes` 仍只删除白名单内的受管文件；整根删除需再加 `--force`。对不上的普通命令文件还要 `--delete-unmatched-command`；只有交互终端且不是 `--json` 时才询问 `Delete unmatched command file <路径>? [y/N]`。`--purge --yes` 本身不算同意。目录和符号链接不在这次确认里删除。普通 `service uninstall` 仍只注销服务。
 - 搜索与表单字段中的括号粘贴和 Ctrl+V 使用纯 Go 实现的 `github.com/atotto/clipboard` 辅助库;Mihari 本身从不把密钥写入剪贴板。
 - 页面:独立的首次运行 Setup 路由、Overview、可展开的 Proxies、带本地 GeoIP 详情的活动/已关闭 Connections、Rules/Providers、有界的结构化 Logs 流、订阅管理表单、分类的 System 页面,以及驱动面板安装/更新/激活/打开/回滚的 Web GUI 页面(在守护进程通告 `web-gui` 能力之后)。
 - Setup 安装核心、可添加初始订阅、准备本地 GeoIP 数据,并请求守护进程持久化校验过的本地端点。
@@ -193,3 +193,10 @@ MIHARI_CONTROL_CREDENTIAL=...
 来源沿用 catalog `url`，存 HTTP/HTTPS URL 或规范 file URI；类型由 scheme 推导并固定。daemon 单独承担本地文件读取和 catalog/cache 写入；CLI/TUI 仅规范化路径并调用 IPC。主缓存保留原始字节，`cache-base-dir` 保存成功读取的实际目标目录，与内容一起提交/回滚；本地相对输入引用只在派生运行配置改为绝对路径，远程保持原生路径语义。
 
 创建流程为锁外读取、解析、候选校验及文件引用确认，锁内重新检查 revision 并发布 catalog/cache，仅当新条目成为活动订阅时提交运行配置；失败补偿。文件引用不构造资源快照，不新增主 YAML watcher。仅创建新条目时确认引用的独立变化、权限和回滚后果；原生 watcher/下载由 mihomo 管理。校验与运行的普通/可信核心环境均固定 `SKIP_SAFE_PATH_CHECK=true`，允许任意引用路径；这是明确批准的路径边界变更，核心身份及安装信任保持。旧安全路径限制在本功能范围由 [ADR 0009](adr/0009-local-yaml-source-and-cache.md) 替代。
+
+
+## Setup 目标执行
+
+本地控制请求可选 `execution_mode: "setup"`，适用端口/完成标记、核心安装、订阅添加与显式刷新、GeoIP 更新。`setup-target-v1` 仅表示已开放资源支持这套语义，不扩大端口恢复 surface 或 Web gateway 权限。Setup TUI 先检查能力，不携带旧页面 `if_revision`；旧请求省略新字段时语义不变，同时提供 `if_revision` 仍执行全局严格前提。
+
+Manager 固定本步目标，合并最新未覆盖设置并经原 mutation owner 提交。只有提交前的相关输入失效才允许最多两次追加准备，下载与选定制品复用；失败、回滚失败或未知结果不能作为内部重提理由。核心重新校验用最新设置和活动订阅生成的配置及同一核心候选，停止状态也不能跳过；核心复用在取得所有权后复查对象身份。添加并启用订阅同一步提交，失败恢复此前有效目录和运行配置。完成引导只写完成标记，跳过不写资源，其他订阅及面板不被清除。全局其他入口的 revision 误冲突另由 Issue #349 跟进。

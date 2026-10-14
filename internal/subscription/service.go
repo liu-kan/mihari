@@ -34,19 +34,21 @@ type ServiceOptions struct {
 }
 
 type Service struct {
-	mu          sync.RWMutex
-	catalogPath string
-	cacheDir    string
-	downloader  Fetcher
-	writeCache  func(string, []byte, os.FileMode) error
-	saveCatalog func(string, Catalog) error
-	now         func() time.Time
-	catalog     Catalog
+	mu               sync.RWMutex
+	catalogPath      string
+	cacheDir         string
+	downloader       Fetcher
+	writeCache       func(string, []byte, os.FileMode) error
+	restoreCacheFile func(string, []byte, os.FileMode) (config.CommitResult, error)
+	saveCatalog      func(string, Catalog) error
+	now              func() time.Time
+	catalog          Catalog
 }
 
 type PreparedRefresh struct {
 	profileID      string
 	profileVersion uint64
+	profile        Profile
 	result         FetchResult
 	document       Document
 }
@@ -88,7 +90,7 @@ func Open(options ServiceOptions) (*Service, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Service{catalogPath: options.CatalogPath, cacheDir: options.CacheDir, downloader: downloader, writeCache: config.AtomicWrite, saveCatalog: Save, now: now, catalog: catalog}, nil
+	return &Service{catalogPath: options.CatalogPath, cacheDir: options.CacheDir, downloader: downloader, writeCache: config.AtomicWrite, restoreCacheFile: config.AtomicWriteWithCommit, saveCatalog: Save, now: now, catalog: catalog}, nil
 }
 
 func (s *Service) Snapshot() Catalog {
@@ -171,7 +173,7 @@ func (s *Service) PrepareRefresh(ctx context.Context, id string) (PreparedRefres
 		baseDir = profile.CacheBaseDir
 	}
 	ResolveFileReferences(document, baseDir)
-	return PreparedRefresh{profileID: id, profileVersion: profile.Version, result: result, document: document}, nil
+	return PreparedRefresh{profileID: id, profileVersion: profile.Version, profile: profile, result: result, document: document}, nil
 }
 
 // refreshFailure preserves both the actual failure and a failed status write.
@@ -230,10 +232,23 @@ func (s *Service) noteRefreshError(id string, cause error, versions ...uint64) e
 func (s *Service) CommitRefresh(prepared PreparedRefresh) (Receipt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.commitRefreshLocked(prepared, s.catalog.Clone())
+	return s.commitRefreshLocked(prepared, s.catalog.Clone(), false)
 }
 
-func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) (receipt Receipt, err error) {
+// CommitRefreshAndActivate refreshes and selects an existing profile in one receipt.
+func (s *Service) CommitRefreshAndActivate(prepared PreparedRefresh) (Receipt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	before := s.catalog.Clone()
+	s.catalog.ActiveID = prepared.profileID
+	if index := s.catalog.Index(prepared.profileID); index >= 0 {
+		s.catalog.Profiles[index].Enabled = true
+	}
+	receipt, err := s.commitRefreshLocked(prepared, before, true)
+	return s.settleSetupCommitLocked(receipt, err)
+}
+
+func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog, setup bool) (receipt Receipt, err error) {
 	keepCommitted := false
 	defer func() {
 		if err != nil && !keepCommitted {
@@ -242,7 +257,7 @@ func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) 
 	}()
 	index := s.catalog.Index(prepared.profileID)
 	if index < 0 || s.catalog.Profiles[index].Version != prepared.profileVersion {
-		return Receipt{}, protocol.APIError{Code: protocol.CodeRevisionConflict, Message: "subscription changed while refresh was in progress"}
+		return Receipt{}, ErrRefreshChanged
 	}
 	after := s.catalog.Clone()
 	profile := &after.Profiles[index]
@@ -255,7 +270,11 @@ func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) 
 	wroteCache := !prepared.result.NotModified
 	if wroteCache {
 		if err := s.writeCache(cachePath, prepared.result.Content, 0o600); err != nil {
-			err = s.failAfterRestore(err, cachePath, cacheBefore, hadCache, true)
+			err = s.failAfterRestore(err, cachePath, cacheBefore, hadCache, true, setup)
+			var api protocol.APIError
+			if errors.As(err, &api) && api.Details["degraded"] == true {
+				return Receipt{}, err
+			}
 			return Receipt{}, diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "write subscription cache"}, err)
 		}
 		profile.Generation++
@@ -280,7 +299,7 @@ func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) 
 		profile.Expire = info.Expire
 	}
 	if err := after.Normalize(); err != nil {
-		return Receipt{}, s.failAfterRestore(err, cachePath, cacheBefore, hadCache, wroteCache)
+		return Receipt{}, s.failAfterRestore(err, cachePath, cacheBefore, hadCache, wroteCache, setup)
 	}
 	after.fillDefaults()
 	if err := s.saveCatalog(s.catalogPath, after); err != nil {
@@ -290,21 +309,21 @@ func (s *Service) commitRefreshLocked(prepared PreparedRefresh, before Catalog) 
 			err = errors.Join(err, fmt.Errorf("restore subscription catalog: %w", restoreErr))
 			durable, readErr := Load(s.catalogPath)
 			if readErr != nil {
-				return Receipt{}, errors.Join(err, fmt.Errorf("inspect subscription catalog after failed restore: %w", readErr))
+				return Receipt{}, subscriptionRollbackError(errors.Join(err, fmt.Errorf("inspect subscription catalog after failed restore: %w", readErr)), setup)
 			}
 			if reflect.DeepEqual(durable, after) {
 				// The new catalog remains committed: retain its matching bytes
 				// and publish the same generation to in-process readers.
 				s.catalog = durable
 				keepCommitted = true
-				return Receipt{}, err
+				return Receipt{Before: before, After: after.Clone(), cachePath: cachePath, cacheBefore: cacheBefore, hadCache: hadCache, wroteCache: wroteCache, profileID: profile.ID}, err
 			}
 			if !reflect.DeepEqual(durable, before) {
-				return Receipt{}, errors.Join(err, errors.New("subscription catalog changed during failed restore"))
+				return Receipt{}, subscriptionRollbackError(errors.Join(err, errors.New("subscription catalog changed during failed restore")), setup)
 			}
 
 		}
-		return Receipt{}, s.failAfterRestore(err, cachePath, cacheBefore, hadCache, wroteCache)
+		return Receipt{}, s.failAfterRestore(err, cachePath, cacheBefore, hadCache, wroteCache, setup)
 	}
 	s.catalog = after
 	return Receipt{Before: before, After: after.Clone(), cachePath: cachePath, cacheBefore: cacheBefore, hadCache: hadCache, wroteCache: wroteCache, profileID: profile.ID}, nil
@@ -361,24 +380,36 @@ func (s *Service) ReadCache(id string) ([]byte, Document, error) {
 
 // failAfterRestore returns original, joined with the cache rollback error when
 // the rollback itself fails, so a failed refresh never hides a failed restore.
-func (s *Service) failAfterRestore(original error, path string, content []byte, existed, changed bool) error {
+func (s *Service) failAfterRestore(original error, path string, content []byte, existed, changed, setup bool) error {
 	if err := s.restoreCache(path, content, existed, changed); err != nil {
-		return errors.Join(original, fmt.Errorf("restore subscription cache: %w", err))
+		return subscriptionRollbackError(errors.Join(original, fmt.Errorf("restore subscription cache: %w", err)), setup)
 	}
 	return original
 }
 
 func (s *Service) restoreCache(path string, content []byte, existed, changed bool) error {
+	_, err := s.restoreCacheWithCommit(path, content, existed, changed)
+	return err
+}
+
+// restoreCacheWithCommit distinguishes a failed replacement from a sync warning
+// after replacement, even when the old and new YAML bytes happen to be equal.
+func (s *Service) restoreCacheWithCommit(path string, content []byte, existed, changed bool) (bool, error) {
 	if !changed {
-		return nil
+		return true, nil
 	}
 	if existed {
-		return config.AtomicWrite(path, content, 0o600)
+		result, err := s.restoreCacheFile(path, content, 0600)
+		return result.Committed, errors.Join(err, result.Warning)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "remove rolled-back subscription cache"}, err)
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
 	}
-	return nil
+	if err != nil {
+		return false, diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "remove rolled-back subscription cache"}, err)
+	}
+	return true, nil
 }
 
 func newProfileID() (string, error) {
@@ -391,4 +422,95 @@ func newProfileID() (string, error) {
 
 func notFoundError() error {
 	return protocol.APIError{Code: protocol.CodeInvalidArgument, Message: "subscription not found"}
+}
+
+// ErrRefreshChanged identifies a prepared refresh invalidated before publication.
+var ErrRefreshChanged = staleRefreshError{}
+
+type staleRefreshError struct{}
+
+func (staleRefreshError) Error() string { return "subscription changed while refresh was in progress" }
+func (e staleRefreshError) Unwrap() error {
+	return protocol.APIError{Code: protocol.CodeRevisionConflict, Message: e.Error()}
+}
+
+// ReprepareSetupRefresh preserves the selected source while rebasing harmless
+// metadata changes. A changed cache used by a 304 response must be fetched again.
+func (s *Service) ReprepareSetupRefresh(ctx context.Context, prepared PreparedRefresh) (PreparedRefresh, error) {
+	catalog := s.Snapshot()
+	index := catalog.Index(prepared.profileID)
+	if index < 0 {
+		return PreparedRefresh{}, notFoundError()
+	}
+	current := catalog.Profiles[index]
+	if current.URL != prepared.profile.URL || current.ProxyMode != prepared.profile.ProxyMode {
+		return PreparedRefresh{}, protocol.APIError{Code: protocol.CodeInvalidState, Message: "selected subscription source changed; review the subscription before retrying setup"}
+	}
+	if prepared.result.NotModified && (current.Generation != prepared.profile.Generation || current.CacheBaseDir != prepared.profile.CacheBaseDir) {
+		next, err := s.PrepareRefresh(ctx, prepared.profileID)
+		if err != nil {
+			return PreparedRefresh{}, err
+		}
+		if next.profile.URL != prepared.profile.URL || next.profile.ProxyMode != prepared.profile.ProxyMode {
+			return PreparedRefresh{}, protocol.APIError{Code: protocol.CodeInvalidState, Message: "selected subscription source changed during setup refresh"}
+		}
+		return next, nil
+	}
+	prepared.profileVersion = current.Version
+	prepared.profile = current
+	return prepared, nil
+}
+
+func subscriptionRollbackError(err error, setup bool) error {
+	if !setup {
+		return err
+	}
+	return diagnostics.Wrap(protocol.APIError{Code: protocol.CodeDataFailure, Message: "subscription state rollback failed", Details: map[string]any{"degraded": true}}, err)
+}
+
+// settleSetupCommitLocked compensates a retained catalog before the runtime has
+// applied its configuration. Restore cache bytes first so a failed replacement
+// leaves the committed catalog and its matching cache untouched.
+func (s *Service) settleSetupCommitLocked(receipt Receipt, err error) (Receipt, error) {
+	if err == nil || receipt.profileID == "" {
+		return receipt, err
+	}
+	var cacheAfter []byte
+	if receipt.wroteCache {
+		var readErr error
+		cacheAfter, readErr = os.ReadFile(receipt.cachePath)
+		if readErr != nil {
+			return Receipt{}, subscriptionRollbackError(errors.Join(err, fmt.Errorf("read committed subscription cache before compensation: %w", readErr)), true)
+		}
+	}
+	restored, cacheErr := s.restoreCacheWithCommit(receipt.cachePath, receipt.cacheBefore, receipt.hadCache, receipt.wroteCache)
+	if !restored {
+		return Receipt{}, subscriptionRollbackError(errors.Join(err, cacheErr), true)
+	}
+	restoreErr := s.saveCatalog(s.catalogPath, receipt.Before)
+	if restoreErr != nil {
+		durable, readErr := Load(s.catalogPath)
+		if readErr != nil {
+			return Receipt{}, subscriptionRollbackError(errors.Join(err, cacheErr, restoreErr, readErr), true)
+		}
+		s.catalog = durable
+		if reflect.DeepEqual(durable, receipt.After) {
+			// Metadata stayed committed. Put back the matching new cache rather than
+			// pairing that generation and reference base with rolled-back bytes.
+			if receipt.wroteCache {
+				if forwardErr := s.writeCache(receipt.cachePath, cacheAfter, 0600); forwardErr != nil {
+					return Receipt{}, subscriptionRollbackError(errors.Join(err, cacheErr, restoreErr, fmt.Errorf("restore committed subscription cache after failed catalog rollback: %w", forwardErr)), true)
+				}
+			}
+			return Receipt{}, subscriptionRollbackError(errors.Join(err, cacheErr, restoreErr), true)
+		}
+		if !reflect.DeepEqual(durable, receipt.Before) {
+			return Receipt{}, subscriptionRollbackError(errors.Join(err, cacheErr, restoreErr, errors.New("subscription catalog changed during setup compensation")), true)
+		}
+	}
+	s.catalog = receipt.Before.Clone()
+	if restoreErr != nil || cacheErr != nil {
+		return Receipt{}, subscriptionRollbackError(errors.Join(err, restoreErr, cacheErr), true)
+	}
+	return Receipt{}, err
 }
