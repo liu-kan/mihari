@@ -226,9 +226,28 @@ func doGET(ctx context.Context, client *http.Client, rawURL string, allowHTTP bo
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		raw, readErr := io.ReadAll(io.LimitReader(response.Body, diagnostics.MaxHTTPBodyBytes+1))
 		closeErr := response.Body.Close()
-		return nil, downloadFailure{message: fmt.Sprintf("download geoip resource: unexpected HTTP status %d", response.StatusCode), cause: &diagnostics.HTTPError{Operation: "geoip GET resource", URL: rawURL, Phase: "response", Status: response.StatusCode, Body: diagnostics.HTTPBody(raw), BodyTruncated: len(raw) > diagnostics.MaxHTTPBodyBytes, Cause: errors.Join(readErr, closeErr)}}
+		message := fmt.Sprintf("download geoip resource: unexpected HTTP status %d", response.StatusCode)
+		if isFixedGitHubDownload(rawURL, response) && diagnostics.GitHubRateLimited(response.StatusCode, response.Header, diagnostics.HTTPBody(raw)) {
+			message = diagnostics.GitHubRateLimitSummary
+		}
+		return nil, downloadFailure{message: message, cause: &diagnostics.HTTPError{Operation: "geoip GET resource", URL: rawURL, Phase: "response", Status: response.StatusCode, Body: diagnostics.HTTPBody(raw), BodyTruncated: len(raw) > diagnostics.MaxHTTPBodyBytes, Cause: errors.Join(readErr, closeErr)}}
 	}
 	return response, nil
+}
+
+// Source options are also used for custom downloads and fixtures. Only the fixed
+// application resources, still served by GitHub after redirects, get its label.
+func isFixedGitHubDownload(source string, response *http.Response) bool {
+	switch source {
+	case DefaultCountryURL, DefaultCountryChecksumURL, DefaultASNURL, DefaultASNChecksumURL:
+	default:
+		return false
+	}
+	if response.Request == nil || response.Request.URL == nil {
+		return false
+	}
+	final := response.Request.URL
+	return final.Scheme == "https" && strings.EqualFold(final.Host, "raw.githubusercontent.com") && final.User == nil
 }
 
 func closeGeoIPResponse(ctx context.Context, response *http.Response, rawURL string, resultErr *error, reporter diagnostics.Reporter) {
