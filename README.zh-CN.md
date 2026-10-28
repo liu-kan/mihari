@@ -131,7 +131,7 @@ mihari sysproxy enable
 - **订阅配置**:每个订阅独立缓存、离线切换、按配置独立的刷新间隔、按订阅的拉取代理(`direct` / `proxy` / `auto`;`auto` 在可回退的代理网络错误后尝试直连),以及经过校验的原子化配置生成与回滚。
 - **Web 面板**:一键安装 / 更新 / 激活 / 回滚 zashboard 与 MetaCubeXD,置于带独立访问凭据的回环 Web 网关之后。
 - **系统代理与 TUN**:跨平台的系统代理控制与托管 TUN,均由守护进程持有并持久化。若其他产品已持有系统代理(`system_proxy_conflict`),或检测到其他 TUN / mihomo 实例(`tun_conflict`),enable 会失败,除非传入 `--force`(TUI 会要求确认)。
-- **端口配置**:System 页面可修改 Mixed / Controller / Web 端口;占用显示 `Owned` 或 `Occupied by name (pid)`。启动期间尚未收到核心身份时，已检测到监听进程的端口显示中性的 `Checking owner…`。在 Linux 上，未提权的 TUI 无法确认占用者时显示 `Needs admin`。重启后，归属判断随守护进程/核心 PID 更新，无需重新进入页面。应用后通常需要重启守护进程。
+- **端口配置**:System 页面可修改 Mixed / Controller / Web 端口;占用显示 `Owned` 或 `Occupied by name (pid)`。启动期间尚未收到核心身份时，已检测到监听进程的端口显示中性的 `Checking owner…`。在 Linux 上，未提权的 TUI 无法确认占用者时显示 `Needs admin`。重启后，归属判断随守护进程/核心 PID 更新，无需重新进入页面。保存时仅提交实际改动的端口，刷新无关状态导致的旧版本；提交期间仅对已确认的版本冲突最多追加两次重试，网络错误等写入结果不明的失败不重试。正在编辑的端口被其他客户端修改时，需重新打开编辑器；其他端口的修改会保留。应用后通常需要重启守护进程。daemon 会在启动核心前将已保存的 Mixed / Controller 地址同步到现有运行配置；存在本地核心时，候选配置须先通过核心校验再原子替换，校验失败保留原文件。
 - **TUI 内更新 Mihari**：导航栏选中 System、按 Enter 进入之前检查 GitHub Releases，显示 `当前版本 -> 最新版本 available` 或 `当前版本 · Up to date`；以管理员/root 权限启动时可替换二进制、同步并重启已安装的系统服务副本、验证 daemon 版本，并自动进入更新后的 TUI。更新确认会将安全的非标准已安装构建标识显示为 `Unknown[标识]`，兼容性仍为未知；长内容可用 ↑/↓ 或 PgUp/PgDn 滚动，默认选择 Cancel。
 - **内核通道**:System 页面可在 mihomo 的 `stable` / `alpha` 通道之间切换。核心安装、更新、重装、切换通道或重启期间，mihomo core 信息行和操作行都会显示盲文运行动画与进度状态。动画标记添加在原有信息之前，操作成功或失败后消失；窄窗口优先显示动画，其余信息按可用宽度裁剪。
 - **自动版本检查**：导航栏选中 System、按 Enter 进入之前，每次都会检查 Mihari 和 core 当前通道。按 Enter 进入页面不会再次发起这两项检查，也不会取消已经在进行的检查。进入 Web GUI 时逐项检查所有支持的面板，包括尚未安装的面板。Core 与 Mihari 检查会显示带动画的 `Checking`，随后显示 `当前版本 -> 最新版本 available`、`Up to date` 或 `Check failed`；这些 System 检查不会阻断其他 System 操作。Web GUI 面板检查进行时，Latest 使用同一个 badge。面板的成功结果在本次 TUI 会话内缓存 5 分钟。Mihari 或 core 检查失败时，下次用导航栏再次选中 System 会重试。core 安装/通道切换，以及面板安装/更新/回滚/重装/卸载成功后，立即刷新对应版本检查。检查只获取元数据，安装仍需确认。
@@ -171,6 +171,8 @@ TUI 订阅表格的 Name 和 Traffic 列按内容分配宽度，分别最多占 
 **System → Network** 在 daemon 启动时应用保存的系统代理或 TUN 状态期间显示橙色 **Applying…** 动画 badge，开启与关闭目标均适用。该次启动应用完成、失败或取消后停止动画。页面导航和手动操作保持可用；此标记不代表自动修复状态漂移。
 
 mihomo HTTP 失败的原始报错与上游状态会写入诊断日志，范围包括 gateway 和 WebSocket 握手。日志、导出及本地 CLI/TUI 错误汇报均不脱敏，保留错误自带的凭据、URL、路径与配置片段。CLI 分段展示概要、错误分类和原始详情，JSON 增加可选诊断和 warnings，业务退出码保持不变。TUI 所有页面均可按 F2 打开统一诊断历史，滚动查看详情并复制原文。终端控制字符仅在显示时转义。
+
+固定 GitHub 资源（Mihari、mihomo、内置面板及 GeoIP）确认限流时，错误说明统一为 `GitHub rate limit exceeded. Please try again later.`。失败 Badge 保持简短；F2 保留原始操作、HTTP 状态、URL、响应正文与原因链。不处理重试时间头，不改变现有重试行为；自定义订阅地址及安装脚本不在此处理范围。
 
 F2 每次发生保留独立记录，以级别颜色和选中高亮帮助浏览。宽终端左右显示列表和详情，窄终端上下排列。Tab 切换窗格，方向键、PgUp/PgDn、Home/End 导航，c 复制原始详情，Esc 返回；新记录不会抢走当前选择。Web gateway 允许来自 mihomo 的单条消息最大 1 MiB，与 mihomo 流客户端一致；浏览器发送方向仍限制为 32 KiB。
 

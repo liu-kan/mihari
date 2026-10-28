@@ -1054,6 +1054,9 @@ func (m *Model) Update(message tea.Msg) (page ui.Page, command tea.Cmd) {
 	case portsApplyResultMsg:
 		m.clearRowPending()
 		if typed.err != nil {
+			if typed.status.MixedAddr != "" {
+				m.onboarding = typed.status
+			}
 			m.markRowOutcome(m.focusID, false, ui.PortsApplyFailed)
 			return m, m.rowSpinCmdIfNeeded()
 		}
@@ -1525,7 +1528,13 @@ func (m *Model) buildSectionContent() (lines []string, focusStart, focusEnd int)
 			default:
 				value = ui.RenderStatusChip(m.theme, ui.StatusChipFailed, ui.FailedLabel)
 				if m.outcomeDetail != "" {
-					value += "  " + m.theme.Danger.Render(ui.TruncateVisible(m.outcomeDetail, 48))
+					detail := ui.TruncateVisible(m.outcomeDetail, 48)
+					if m.outcomeDetail == diagnostics.GitHubRateLimitSummary {
+						// Account for the two spaces before both the badge and its detail.
+						detailWidth := ui.SectionTextWidth(inner) - lipgloss.Width(labelPart) - lipgloss.Width(value) - 4
+						detail = ui.TruncateVisible(m.outcomeDetail, detailWidth)
+					}
+					value += "  " + m.theme.Danger.Render(detail)
 				}
 			}
 		}
@@ -2874,18 +2883,27 @@ func (m *Model) confirmPortEdit() tea.Cmd {
 		return m.cancelPortEdit()
 	}
 	_ = m.cancelPortEdit()
-	revision, operationID := m.onboarding.Revision, m.newOperationID()
+	baseline := m.onboarding
 	request := protocol.OnboardingUpdateRequest{
-		OperationID: operationID, IfRevision: &revision,
-		MixedAddr: &mixed, ControllerAddr: &controller, WebAddr: &web,
+		OperationID: m.newOperationID(),
 	}
+	if mixed != baseline.MixedAddr {
+		request.MixedAddr = &mixed
+	}
+	if controller != baseline.ControllerAddr {
+		request.ControllerAddr = &controller
+	}
+	if web != baseline.WebAddr {
+		request.WebAddr = &web
+	}
+	ctx, client := m.ctx, m.client
 	return func() tea.Msg {
 		return ui.ActionIntentMsg{
 			Action: ui.ActionApplyEndpointChange, Page: ui.PageSystem, Capability: protocol.CapabilityOnboarding,
 			Key: "system:ports", Title: ui.ReplaceConfigurationTitle, Object: ui.PortsConfigSectionTitle,
 			Impact: ui.ReplaceConfigurationImpact, Rollback: ui.ReplaceConfigurationRollback,
 			Execute: func() tea.Msg {
-				status, err := m.client.UpdateOnboarding(m.ctx, request)
+				status, err := applyPortUpdate(ctx, client, baseline, request)
 				return portsApplyResultMsg{status: status, err: err}
 			},
 		}
