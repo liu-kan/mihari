@@ -305,6 +305,23 @@ func TestProxiesPreservesGLOBALAllOrder(t *testing.T) {
 	}
 }
 
+func TestOrderedProxyGroups_LeftoversAreDeterministic(t *testing.T) {
+	proxies := map[string]mihomo.Proxy{
+		"GLOBAL": {Name: "GLOBAL", Type: "Selector", Now: "PXY", All: []string{"PXY"}},
+		"PXY":    {Name: "PXY", Type: "Selector", All: []string{"leaf"}},
+		"leaf":   {Name: "leaf", Type: "Direct"},
+	}
+	for _, name := range []string{"YouTube", "JP-Auto", "Netflix", "AI", "Apple", "Steam"} {
+		proxies[name] = mihomo.Proxy{Name: name, Type: "Selector", All: []string{"leaf"}}
+	}
+	want := []string{"PXY", "AI", "Apple", "GLOBAL", "JP-Auto", "Netflix", "Steam", "YouTube"}
+	for i := 0; i < 50; i++ {
+		if got := groupNames(orderedProxyGroups(proxies)); !slices.Equal(got, want) {
+			t.Fatalf("iteration %d order=%v want %v", i, got, want)
+		}
+	}
+}
+
 func TestProxiesMapsGroupTestURL(t *testing.T) {
 	fake := &fakeRuntime{proxies: mihomo.Proxies{Proxies: map[string]mihomo.Proxy{
 		"GLOBAL": {Name: "GLOBAL", Type: "Selector", Now: "HK", All: []string{"HK", "leaf"}},
