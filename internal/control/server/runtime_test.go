@@ -305,6 +305,35 @@ func TestProxiesPreservesGLOBALAllOrder(t *testing.T) {
 	}
 }
 
+func TestOrderedProxyGroups_StableFallbackOrder(t *testing.T) {
+	for _, withGlobal := range []bool{false, true} {
+		name := "without GLOBAL"
+		if withGlobal {
+			name = "partial GLOBAL order"
+		}
+		t.Run(name, func(t *testing.T) {
+			proxies := map[string]mihomo.Proxy{
+				"Zebra":  {Name: "Zebra", Type: "Selector", All: []string{"leaf"}},
+				"Alpha":  {Name: "Alpha", Type: "Selector", All: []string{"leaf"}},
+				"Tokyo":  {Name: "Tokyo", Type: "URLTest", All: []string{"leaf"}},
+				"Berlin": {Name: "Berlin", Type: "Selector", All: []string{"leaf"}},
+				"leaf":   {Name: "leaf", Type: "Direct"},
+			}
+			want := []string{"Alpha", "Berlin", "Tokyo", "Zebra"}
+			if withGlobal {
+				proxies["GLOBAL"] = mihomo.Proxy{Name: "GLOBAL", Type: "Selector", All: []string{"Zebra", "Alpha", "Zebra", "leaf", "missing"}}
+				want = []string{"Zebra", "Alpha", "Berlin", "GLOBAL", "Tokyo"}
+			}
+			for refresh := 0; refresh < 64; refresh++ {
+				got := groupNames(orderedProxyGroups(proxies))
+				if !slices.Equal(got, want) {
+					t.Fatalf("refresh %d: groups=%v want=%v", refresh, got, want)
+				}
+			}
+		})
+	}
+}
+
 func TestProxiesMapsGroupTestURL(t *testing.T) {
 	fake := &fakeRuntime{proxies: mihomo.Proxies{Proxies: map[string]mihomo.Proxy{
 		"GLOBAL": {Name: "GLOBAL", Type: "Selector", Now: "HK", All: []string{"HK", "leaf"}},

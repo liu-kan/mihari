@@ -35,6 +35,8 @@ Specifically:
 - **Web panels**: one-click install and open of the zashboard / MetaCubeXD panels
 - **Connections & rules**: live view of connections, proxy groups, and rules, with local GeoIP resolution
 
+Proxy groups follow `GLOBAL.All` order where available; remaining groups use name order so periodic refreshes do not reshuffle them.
+
 ## Quick start
 
 **Install**

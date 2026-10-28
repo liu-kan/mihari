@@ -231,13 +231,18 @@ func orderedProxyGroups(proxies map[string]mihomo.Proxy) []protocol.ProxyGroup {
 			groups = append(groups, toGroup(proxy))
 		}
 	}
-	// Append any remaining groups (e.g. when GLOBAL is missing). Order among
-	// leftovers is unspecified map order, but keeps completeness.
+	// Preserve GLOBAL.All order above, then append remaining groups in name
+	// order so repeated snapshots cannot reshuffle them.
+	remaining := make([]string, 0, len(proxies))
 	for name, proxy := range proxies {
 		if !isGroup(proxy) || seen[name] {
 			continue
 		}
-		groups = append(groups, toGroup(proxy))
+		remaining = append(remaining, name)
+	}
+	sort.Strings(remaining)
+	for _, name := range remaining {
+		groups = append(groups, toGroup(proxies[name]))
 	}
 	return groups
 }
